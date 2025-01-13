@@ -314,7 +314,6 @@ function M.validate_resources()
                   validate_block_attributes(block_type.block, block, block_path .. "." .. name)
                 end
               elseif dynamic_block then
-                -- Count total dynamic blocks in the resource path
                 local function count_dynamic_blocks(current_block)
                   local count = 0
                   for _, _ in pairs(current_block.dynamic_blocks) do
@@ -328,7 +327,10 @@ function M.validate_resources()
                   end
                   return count
                 end
+
                 -- Skip validation if resource has multiple dynamic blocks
+                -- FIX: nested dynamic blocks checks
+
                 if count_dynamic_blocks(resource) > 1 then
                   goto continue
                 end
