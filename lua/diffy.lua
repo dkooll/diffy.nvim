@@ -1,13 +1,69 @@
 local M = {}
 -- Cache for provider schemas
 local schema_cache = {}
+local output_bufnr = nil
+local output_winid = nil
+
+-- Function to create or get output buffer
+local function ensure_output_buffer()
+  if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
+    output_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.bo[output_bufnr].buftype = 'nofile'
+    vim.bo[output_bufnr].bufhidden = 'hide'
+    vim.bo[output_bufnr].swapfile = false
+    vim.api.nvim_buf_set_name(output_bufnr, 'Terraform Schema Validation')
+  end
+  return output_bufnr
+end
+
+-- Function to ensure output window is visible
+local function ensure_output_window()
+  if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
+    -- Save current window
+    local current_win = vim.api.nvim_get_current_win()
+
+    -- Create split and set options
+    vim.cmd('botright split')
+    output_winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(output_winid, ensure_output_buffer())
+    vim.api.nvim_win_set_height(output_winid, 10)
+
+    -- Set window options
+    vim.wo[output_winid].wrap = false
+    vim.wo[output_winid].number = false
+    vim.wo[output_winid].relativenumber = false
+
+    -- Return to original window
+    vim.api.nvim_set_current_win(current_win)
+  end
+  return output_winid
+end
+
+-- Helper function to write to output buffer
+local function write_output(lines, clear)
+  if clear then
+    vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
+  end
+
+  if type(lines) == "string" then
+    lines = { lines }
+  end
+
+  local buf = ensure_output_buffer()
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, lines)
+
+  -- Ensure window is visible and scroll to bottom
+  local win = ensure_output_window()
+  vim.api.nvim_win_set_cursor(win, { line_count + #lines, 0 })
+  vim.cmd('redraw')
+end
 
 -- Check if HCL parser is available
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
-    vim.api.nvim_err_writeln("HCL parser not found. Please ensure tree-sitter HCL is installed.")
-    vim.cmd("redraw")
+    write_output("HCL parser not found. Please ensure tree-sitter HCL is installed.")
     return false
   end
   return true
@@ -27,28 +83,18 @@ end
 -- Helper function to cleanup
 local function cleanup(temp_dir)
   if temp_dir then
-    vim.fn.system({'rm', '-rf', temp_dir})
-  end
-end
-
--- Helper function to print output in real-time
-local function print_output(data)
-  if data then
-    for _, line in ipairs(data) do
-      if line and line ~= "" then
-        vim.api.nvim_out_write(line .. "\n")
-        vim.cmd("redraw")
-      end
-    end
+    vim.fn.system({ 'rm', '-rf', temp_dir })
   end
 end
 
 -- Function to handle terraform initialization and schema fetching
 function M.fetch_schema(callback)
+  -- Clear output and show window
+  write_output({}, true)
+
   local temp_dir = create_temp_dir()
   if not temp_dir then
-    vim.api.nvim_err_writeln("Failed to create temporary directory")
-    vim.cmd("redraw")
+    write_output("Failed to create temporary directory")
     return
   end
 
@@ -57,8 +103,7 @@ function M.fetch_schema(callback)
   local f = io.open(config_file, "w")
   if not f then
     cleanup(temp_dir)
-    vim.api.nvim_err_writeln("Failed to create temporary configuration")
-    vim.cmd("redraw")
+    write_output("Failed to create temporary configuration")
     return
   end
   f:write('terraform {\n  required_providers {\n    azurerm = {\n      source = "hashicorp/azurerm"\n    }\n  }\n}\n')
@@ -68,22 +113,24 @@ function M.fetch_schema(callback)
   local init_job = vim.fn.jobstart({ 'terraform', 'init' }, {
     cwd = temp_dir,
     on_stdout = function(_, data)
-      print_output(data)
+      if data and #data > 0 then
+        write_output(vim.tbl_filter(function(line)
+          return line and line ~= ""
+        end, data))
+      end
     end,
     on_stderr = function(_, data)
       if data and #data > 0 then
-        for _, line in ipairs(data) do
-          if line ~= "" then
-            vim.api.nvim_err_writeln("Error: " .. line)
-            vim.cmd("redraw")
-          end
-        end
+        write_output(vim.tbl_map(function(line)
+          return "Error: " .. line
+        end, vim.tbl_filter(function(line)
+          return line and line ~= ""
+        end, data)))
       end
     end,
     on_exit = function(_, exit_code)
       if exit_code ~= 0 then
-        vim.api.nvim_err_writeln("Failed to initialize Terraform")
-        vim.cmd("redraw")
+        write_output("Failed to initialize Terraform")
         cleanup(temp_dir)
         return
       end
@@ -102,18 +149,20 @@ function M.fetch_schema(callback)
                 callback()
               end
             else
-              vim.api.nvim_err_writeln("Failed to parse schema JSON")
-              vim.cmd("redraw")
+              write_output("Failed to parse schema JSON")
             end
           end
         end,
         on_stderr = function(_, data)
-          print_output(data)
+          if data and #data > 0 then
+            write_output(vim.tbl_filter(function(line)
+              return line and line ~= ""
+            end, data))
+          end
         end,
         on_exit = function(_, schema_exit_code)
           if schema_exit_code ~= 0 then
-            vim.api.nvim_err_writeln("Failed to fetch schema")
-            vim.cmd("redraw")
+            write_output("Failed to fetch schema")
           end
           cleanup(temp_dir)
         end
@@ -122,8 +171,7 @@ function M.fetch_schema(callback)
   })
 
   if init_job == 0 then
-    vim.api.nvim_err_writeln("Failed to start Terraform initialization")
-    vim.cmd("redraw")
+    write_output("Failed to start Terraform initialization")
     cleanup(temp_dir)
   end
 end
@@ -225,6 +273,8 @@ end
 
 -- Validate resources and print results
 function M.validate_resources()
+  write_output({}, true) -- Clear previous output
+
   -- Always fetch fresh schema to ensure we have latest
   M.fetch_schema(function()
     local resources = M.parse_current_buffer()
@@ -237,13 +287,12 @@ function M.validate_resources()
             for name, attr in pairs(block_schema.attributes) do
               if not attr.computed and not block_data.properties[name] then
                 if attr.required then
-                  vim.api.nvim_out_write(string.format("%s missing required property %s in %s\n",
+                  write_output(string.format("%s missing required property %s in %s",
                     resource.type, name, block_path))
                 else
-                  vim.api.nvim_out_write(string.format("%s missing optional property %s in %s\n",
+                  write_output(string.format("%s missing optional property %s in %s",
                     resource.type, name, block_path))
                 end
-                vim.cmd("redraw")
               end
             end
           end
@@ -283,13 +332,12 @@ function M.validate_resources()
                   for prop_name, attr in pairs(block_type.block.attributes) do
                     if not attr.computed and not dynamic_block.properties[prop_name] then
                       if attr.required then
-                        vim.api.nvim_out_write(string.format("%s missing required property %s in %s\n",
+                        write_output(string.format("%s missing required property %s in %s",
                           resource.type, prop_name, block_path .. ".dynamic." .. name))
                       else
-                        vim.api.nvim_out_write(string.format("%s missing optional property %s in %s\n",
+                        write_output(string.format("%s missing optional property %s in %s",
                           resource.type, prop_name, block_path .. ".dynamic." .. name))
                       end
-                      vim.cmd("redraw")
                     end
                   end
                   -- Also check for nested blocks inside dynamic blocks
@@ -297,26 +345,23 @@ function M.validate_resources()
                     for nested_name, nested_block_type in pairs(block_type.block.block_types) do
                       if not dynamic_block.blocks[nested_name] and not dynamic_block.dynamic_blocks[nested_name] then
                         if nested_block_type.min_items and nested_block_type.min_items > 0 then
-                          vim.api.nvim_out_write(string.format("%s missing required block %s in %s\n",
+                          write_output(string.format("%s missing required block %s in %s",
                             resource.type, nested_name, block_path .. ".dynamic." .. name))
                         else
-                          vim.api.nvim_out_write(string.format("%s missing optional block %s in %s\n",
+                          write_output(string.format("%s missing optional block %s in %s",
                             resource.type, nested_name, block_path .. ".dynamic." .. name))
                         end
-                        vim.cmd("redraw")
                       end
                     end
                   end
                 end
                 ::continue::
               elseif block_type.min_items and block_type.min_items > 0 then
-                vim.api.nvim_out_write(string.format("%s missing required block %s in %s\n",
+                write_output(string.format("%s missing required block %s in %s",
                   resource.type, name, block_path))
-                vim.cmd("redraw")
               else
-                vim.api.nvim_out_write(string.format("%s missing optional block %s in %s\n",
+                write_output(string.format("%s missing optional block %s in %s",
                   resource.type, name, block_path))
-                vim.cmd("redraw")
               end
               ::continue::
             end
@@ -331,9 +376,7 @@ end
 
 function M.setup(opts)
   opts = opts or {}
-  vim.api.nvim_create_user_command("TerraformValidateSchema", function()
-    M.validate_resources()
-  end, {})
+  vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 end
 
 return M
