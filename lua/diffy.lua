@@ -6,7 +6,8 @@ local schema_cache = {}
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
-    print("HCL parser not found. Please ensure tree-sitter HCL is installed.")
+    vim.api.nvim_err_writeln("HCL parser not found. Please ensure tree-sitter HCL is installed.")
+    vim.cmd("redraw")
     return false
   end
   return true
@@ -26,13 +27,19 @@ end
 -- Helper function to cleanup
 local function cleanup(temp_dir)
   if temp_dir then
-    vim.fn.jobstart({ 'rm', '-rf', temp_dir }, {
-      on_stderr = function(_, data)
-        if data and #data > 0 then
-          print("Cleanup error:", vim.fn.join(data, "\n"))
-        end
+    vim.fn.system({'rm', '-rf', temp_dir})
+  end
+end
+
+-- Helper function to print output in real-time
+local function print_output(data)
+  if data then
+    for _, line in ipairs(data) do
+      if line and line ~= "" then
+        vim.api.nvim_out_write(line .. "\n")
+        vim.cmd("redraw")
       end
-    })
+    end
   end
 end
 
@@ -40,7 +47,8 @@ end
 function M.fetch_schema(callback)
   local temp_dir = create_temp_dir()
   if not temp_dir then
-    print("Failed to create temporary directory")
+    vim.api.nvim_err_writeln("Failed to create temporary directory")
+    vim.cmd("redraw")
     return
   end
 
@@ -49,7 +57,8 @@ function M.fetch_schema(callback)
   local f = io.open(config_file, "w")
   if not f then
     cleanup(temp_dir)
-    print("Failed to create temporary configuration")
+    vim.api.nvim_err_writeln("Failed to create temporary configuration")
+    vim.cmd("redraw")
     return
   end
   f:write('terraform {\n  required_providers {\n    azurerm = {\n      source = "hashicorp/azurerm"\n    }\n  }\n}\n')
@@ -59,26 +68,22 @@ function M.fetch_schema(callback)
   local init_job = vim.fn.jobstart({ 'terraform', 'init' }, {
     cwd = temp_dir,
     on_stdout = function(_, data)
-      if data and #data > 0 then
-        for _, line in ipairs(data) do
-          if line ~= "" then
-            print(line)
-          end
-        end
-      end
+      print_output(data)
     end,
     on_stderr = function(_, data)
       if data and #data > 0 then
         for _, line in ipairs(data) do
           if line ~= "" then
-            print("Error: " .. line)
+            vim.api.nvim_err_writeln("Error: " .. line)
+            vim.cmd("redraw")
           end
         end
       end
     end,
     on_exit = function(_, exit_code)
       if exit_code ~= 0 then
-        print("Failed to initialize Terraform")
+        vim.api.nvim_err_writeln("Failed to initialize Terraform")
+        vim.cmd("redraw")
         cleanup(temp_dir)
         return
       end
@@ -97,22 +102,18 @@ function M.fetch_schema(callback)
                 callback()
               end
             else
-              print("Failed to parse schema JSON")
+              vim.api.nvim_err_writeln("Failed to parse schema JSON")
+              vim.cmd("redraw")
             end
           end
         end,
         on_stderr = function(_, data)
-          if data and #data > 0 then
-            for _, line in ipairs(data) do
-              if line ~= "" then
-                print("Error: " .. line)
-              end
-            end
-          end
+          print_output(data)
         end,
         on_exit = function(_, schema_exit_code)
           if schema_exit_code ~= 0 then
-            print("Failed to fetch schema")
+            vim.api.nvim_err_writeln("Failed to fetch schema")
+            vim.cmd("redraw")
           end
           cleanup(temp_dir)
         end
@@ -121,7 +122,8 @@ function M.fetch_schema(callback)
   })
 
   if init_job == 0 then
-    print("Failed to start Terraform initialization")
+    vim.api.nvim_err_writeln("Failed to start Terraform initialization")
+    vim.cmd("redraw")
     cleanup(temp_dir)
   end
 end
@@ -235,10 +237,13 @@ function M.validate_resources()
             for name, attr in pairs(block_schema.attributes) do
               if not attr.computed and not block_data.properties[name] then
                 if attr.required then
-                  print(string.format("%s missing required property %s in %s", resource.type, name, block_path))
+                  vim.api.nvim_out_write(string.format("%s missing required property %s in %s\n",
+                    resource.type, name, block_path))
                 else
-                  print(string.format("%s missing optional property %s in %s", resource.type, name, block_path))
+                  vim.api.nvim_out_write(string.format("%s missing optional property %s in %s\n",
+                    resource.type, name, block_path))
                 end
+                vim.cmd("redraw")
               end
             end
           end
@@ -278,12 +283,13 @@ function M.validate_resources()
                   for prop_name, attr in pairs(block_type.block.attributes) do
                     if not attr.computed and not dynamic_block.properties[prop_name] then
                       if attr.required then
-                        print(string.format("%s missing required property %s in %s", resource.type, prop_name,
-                          block_path .. ".dynamic." .. name))
+                        vim.api.nvim_out_write(string.format("%s missing required property %s in %s\n",
+                          resource.type, prop_name, block_path .. ".dynamic." .. name))
                       else
-                        print(string.format("%s missing optional property %s in %s", resource.type, prop_name,
-                          block_path .. ".dynamic." .. name))
+                        vim.api.nvim_out_write(string.format("%s missing optional property %s in %s\n",
+                          resource.type, prop_name, block_path .. ".dynamic." .. name))
                       end
+                      vim.cmd("redraw")
                     end
                   end
                   -- Also check for nested blocks inside dynamic blocks
@@ -291,21 +297,26 @@ function M.validate_resources()
                     for nested_name, nested_block_type in pairs(block_type.block.block_types) do
                       if not dynamic_block.blocks[nested_name] and not dynamic_block.dynamic_blocks[nested_name] then
                         if nested_block_type.min_items and nested_block_type.min_items > 0 then
-                          print(string.format("%s missing required block %s in %s", resource.type, nested_name,
-                            block_path .. ".dynamic." .. name))
+                          vim.api.nvim_out_write(string.format("%s missing required block %s in %s\n",
+                            resource.type, nested_name, block_path .. ".dynamic." .. name))
                         else
-                          print(string.format("%s missing optional block %s in %s", resource.type, nested_name,
-                            block_path .. ".dynamic." .. name))
+                          vim.api.nvim_out_write(string.format("%s missing optional block %s in %s\n",
+                            resource.type, nested_name, block_path .. ".dynamic." .. name))
                         end
+                        vim.cmd("redraw")
                       end
                     end
                   end
                 end
                 ::continue::
               elseif block_type.min_items and block_type.min_items > 0 then
-                print(string.format("%s missing required block %s in %s", resource.type, name, block_path))
+                vim.api.nvim_out_write(string.format("%s missing required block %s in %s\n",
+                  resource.type, name, block_path))
+                vim.cmd("redraw")
               else
-                print(string.format("%s missing optional block %s in %s", resource.type, name, block_path))
+                vim.api.nvim_out_write(string.format("%s missing optional block %s in %s\n",
+                  resource.type, name, block_path))
+                vim.cmd("redraw")
               end
               ::continue::
             end
