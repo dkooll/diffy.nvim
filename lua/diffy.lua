@@ -26,7 +26,7 @@ local function ensure_output_window()
     vim.cmd('botright split')
     output_winid = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(output_winid, ensure_output_buffer())
-    vim.api.nvim_win_set_height(output_winid, 15)
+    vim.api.nvim_win_set_height(output_winid, 20)
 
     -- Set window options
     vim.wo[output_winid].wrap = false
@@ -46,7 +46,7 @@ local function write_output(lines, clear)
   end
 
   if type(lines) == "string" then
-    lines = {lines}
+    lines = { lines }
   end
 
   local buf = ensure_output_buffer()
@@ -55,7 +55,7 @@ local function write_output(lines, clear)
 
   -- Ensure window is visible and scroll to bottom
   local win = ensure_output_window()
-  vim.api.nvim_win_set_cursor(win, {line_count + #lines, 0})
+  vim.api.nvim_win_set_cursor(win, { line_count + #lines, 0 })
   vim.cmd('redraw')
 end
 
@@ -83,7 +83,12 @@ end
 -- Helper function to cleanup
 local function cleanup(temp_dir)
   if temp_dir then
-    vim.fn.system({'rm', '-rf', temp_dir})
+    vim.fn.system({ 'rm', '-rf', temp_dir })
+    if vim.v.shell_error == 0 then
+      write_output({ "", "Cleaning up files succeeded" }) -- Add blank line before cleanup status
+    else
+      write_output({ "", "Cleaning up files failed" })
+    end
   end
 end
 
@@ -146,7 +151,7 @@ function M.fetch_schema(callback)
             if success then
               schema_cache = decoded.provider_schemas["registry.terraform.io/hashicorp/azurerm"] or {}
               if callback then
-                write_output({""})  -- Add blank line between init output and validation results
+                write_output({ "" }) -- Add blank line between init output and validation results
                 callback()
               end
             else
@@ -274,7 +279,7 @@ end
 
 -- Validate resources and print results
 function M.validate_resources()
-  write_output({}, true)  -- Clear previous output
+  write_output({}, true) -- Clear previous output
 
   -- Always fetch fresh schema to ensure we have latest
   M.fetch_schema(function()
