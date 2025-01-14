@@ -226,12 +226,14 @@ function M.parse_current_buffer()
           blocks = {},
           dynamic_blocks = {}
         }
+
         -- Query for attributes
         local attr_query = vim.treesitter.query.parse("hcl", "(attribute (identifier) @name)")
         for _, attr_match in attr_query:iter_matches(node, bufnr) do
           local name = vim.treesitter.get_node_text(attr_match[1], bufnr)
           block_data.properties[name] = true
         end
+
         -- Query for regular blocks
         local block_query = vim.treesitter.query.parse("hcl", "(block (identifier) @name (body) @body)")
         for _, block_match in block_query:iter_matches(node, bufnr) do
@@ -241,6 +243,7 @@ function M.parse_current_buffer()
             block_data.blocks[name] = parse_block_contents(body)
           end
         end
+
         -- Query for dynamic blocks
         local dynamic_query = vim.treesitter.query.parse("hcl", [[
           (block
@@ -276,10 +279,9 @@ function M.parse_current_buffer()
   return resources
 end
 
--- Recursive function to validate nested blocks and their attributes
-local function validate_nested_blocks(resource_type, block_schema, block_data, block_path, output_fn)
-  -- Check attributes
-  if block_schema.attributes then
+local function validate_nested_blocks(resource_type, block_schema, block_data, block_path, output_fn, is_dynamic)
+  -- Check attributes (only if not inside a dynamic block)
+  if block_schema.attributes and not is_dynamic then
     for name, attr in pairs(block_schema.attributes) do
       if not attr.computed and not block_data.properties[name] then
         if attr.required then
@@ -301,47 +303,41 @@ local function validate_nested_blocks(resource_type, block_schema, block_data, b
       local dynamic_block = block_data.dynamic_blocks[name]
 
       if block then
-        -- Validate nested block
+        -- Regular nested block
         if block_type.block then
-          validate_nested_blocks(resource_type, block_type.block, block, block_path .. "." .. name, write_output)
+          validate_nested_blocks(resource_type, block_type.block, block, block_path .. "." .. name, output_fn, false)
         end
       elseif dynamic_block then
-        -- Validate dynamic block content
+        -- Dynamic block
         if block_type.block then
-          -- Check content block attributes
-          validate_nested_blocks(resource_type, block_type.block, dynamic_block, block_path .. ".dynamic." .. name,
-            write_output)
+          validate_nested_blocks(resource_type, block_type.block, dynamic_block, block_path .. "." .. name, output_fn,
+            true)
 
-          -- Check for nested blocks inside dynamic block content
+          -- Check for nested blocks inside dynamic block
           if block_type.block.block_types then
             for nested_name, nested_block_type in pairs(block_type.block.block_types) do
               local nested_block = dynamic_block.blocks[nested_name]
               local nested_dynamic = dynamic_block.dynamic_blocks[nested_name]
 
               if nested_block then
-                -- Validate nested block within dynamic block
                 validate_nested_blocks(resource_type, nested_block_type.block, nested_block,
-                  block_path .. ".dynamic." .. name .. "." .. nested_name, write_output)
+                  block_path .. "." .. name .. "." .. nested_name, output_fn, false)
               elseif nested_dynamic then
-                -- Validate nested dynamic block
                 validate_nested_blocks(resource_type, nested_block_type.block, nested_dynamic,
-                  block_path .. ".dynamic." .. name .. ".dynamic." .. nested_name, write_output)
-              elseif nested_block_type.min_items and nested_block_type.min_items > 0 then
-                output_fn(string.format("%s missing required block %s in %s",
-                  resource_type, nested_name, block_path .. ".dynamic." .. name))
-              else
-                output_fn(string.format("%s missing optional block %s in %s",
-                  resource_type, nested_name, block_path .. ".dynamic." .. name))
+                  block_path .. "." .. name .. "." .. nested_name, output_fn, true)
               end
             end
           end
         end
-      elseif block_type.min_items and block_type.min_items > 0 then
-        output_fn(string.format("%s missing required block %s in %s",
-          resource_type, name, block_path))
-      else
-        output_fn(string.format("%s missing optional block %s in %s",
-          resource_type, name, block_path))
+      elseif not is_dynamic then
+        -- Only report missing blocks when not inside a dynamic block
+        if block_type.min_items and block_type.min_items > 0 then
+          output_fn(string.format("%s missing required block %s in %s",
+            resource_type, name, block_path))
+        else
+          output_fn(string.format("%s missing optional block %s in %s",
+            resource_type, name, block_path))
+        end
       end
       ::continue::
     end
@@ -357,7 +353,7 @@ function M.validate_resources()
     for _, resource in ipairs(resources) do
       local schema = schema_cache.resource_schemas[resource.type]
       if schema and schema.block then
-        validate_nested_blocks(resource.type, schema.block, resource, "root", write_output)
+        validate_nested_blocks(resource.type, schema.block, resource, "root", write_output, false)
       end
     end
   end)
