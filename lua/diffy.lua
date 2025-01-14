@@ -1,3 +1,5 @@
+-- This is the new version of the terraform validator that correctly handles nested dynamic blocks
+
 local M = {}
 -- Cache for provider schemas
 local schema_cache = {}
@@ -205,98 +207,94 @@ function M.parse_current_buffer()
     )
   ]])
 
-  for _, captures, _ in query:iter_matches(root, bufnr) do
-    if not captures[1] or not captures[2] or not captures[4] then
-      goto continue
-    end
-    local block_type = vim.treesitter.get_node_text(captures[1], bufnr)
-    if block_type == "resource" then
-      local resource_type = vim.treesitter.get_node_text(captures[2], bufnr):gsub('"', '')
-      local body_node = captures[4]
-      local resource = {
-        type = resource_type,
-        properties = {},
-        blocks = {},
-        dynamic_blocks = {}
-      }
+  -- Function to process block contents with state tracking
+  local function process_block_contents(node)
+    local block_data = {
+      properties = {},
+      blocks = {},
+      dynamic_blocks = {}
+    }
 
-      local function parse_block_contents(node)
-        local block_data = {
+    -- Process attributes
+    local attr_query = vim.treesitter.query.parse("hcl", "(attribute (identifier) @name)")
+    for _, attr_match in attr_query:iter_matches(node, bufnr) do
+      local name = vim.treesitter.get_node_text(attr_match[1], bufnr)
+      if name ~= "for_each" then -- Skip for_each as it's part of dynamic block syntax
+        block_data.properties[name] = true
+      end
+    end
+
+    -- Process nested blocks
+    local block_query = vim.treesitter.query.parse("hcl", "(block (identifier) @name (body) @body)")
+    for _, block_match in block_query:iter_matches(node, bufnr) do
+      local name = vim.treesitter.get_node_text(block_match[1], bufnr)
+      local body = block_match[2]
+
+      if name == "dynamic" then
+        -- Handle dynamic blocks
+        local dynamic_name = nil
+        local dynamic_name_query = vim.treesitter.query.parse("hcl", "(string_lit) @name")
+        for _, name_match in dynamic_name_query:iter_matches(body, bufnr) do
+          dynamic_name = vim.treesitter.get_node_text(name_match[1], bufnr):gsub('"', '')
+          break
+        end
+
+        if dynamic_name then
+          -- Find and process the content block
+          local content_query = vim.treesitter.query.parse("hcl",
+            "(block (identifier) @block_name (body) @content (#eq? @block_name \"content\"))")
+          for _, content_match in content_query:iter_matches(body, bufnr) do
+            local content_body = content_match[2]
+            block_data.dynamic_blocks[dynamic_name] = process_block_contents(content_body)
+          end
+        end
+      elseif name ~= "content" then
+        -- Process regular nested blocks
+        block_data.blocks[name] = process_block_contents(body)
+      end
+    end
+
+    return block_data
+  end
+
+  -- Process each resource found
+  for _, captures, _ in query:iter_matches(root, bufnr) do
+    if captures[1] and captures[2] and captures[4] then
+      local block_type = vim.treesitter.get_node_text(captures[1], bufnr)
+      if block_type == "resource" then
+        local resource_type = vim.treesitter.get_node_text(captures[2], bufnr):gsub('"', '')
+        local body_node = captures[4]
+
+        local resource = {
+          type = resource_type,
           properties = {},
           blocks = {},
           dynamic_blocks = {}
         }
 
-        -- Query for attributes
-        local attr_query = vim.treesitter.query.parse("hcl", "(attribute (identifier) @name)")
-        for _, attr_match in attr_query:iter_matches(node, bufnr) do
-          local name = vim.treesitter.get_node_text(attr_match[1], bufnr)
-          block_data.properties[name] = true
-        end
+        -- Process the resource body
+        local parsed_data = process_block_contents(body_node)
+        resource.properties = parsed_data.properties
+        resource.blocks = parsed_data.blocks
+        resource.dynamic_blocks = parsed_data.dynamic_blocks
 
-        -- Query for regular blocks
-        local block_query = vim.treesitter.query.parse("hcl", "(block (identifier) @name (body) @body)")
-        for _, block_match in block_query:iter_matches(node, bufnr) do
-          local name = vim.treesitter.get_node_text(block_match[1], bufnr)
-          local body = block_match[2]
-          if name ~= "dynamic" then
-            block_data.blocks[name] = parse_block_contents(body)
-          end
-        end
-
-        -- Query for dynamic blocks
-        local dynamic_query = vim.treesitter.query.parse("hcl", [[
-          (block
-            (identifier) @type
-            (string_lit) @name
-            (body) @body
-            (#eq? @type "dynamic"))
-        ]])
-        for _, dyn_match in dynamic_query:iter_matches(node, bufnr) do
-          local dyn_name = vim.treesitter.get_node_text(dyn_match[2], bufnr):gsub('"', '')
-          local dyn_body = dyn_match[3]
-          write_output("Found dynamic block: " .. dyn_name) -- Debug output
-
-          -- Look for content block inside dynamic block
-          local content_query = vim.treesitter.query.parse("hcl",
-            "(block (identifier) @name (body) @body (#eq? @name \"content\"))")
-          for _, content_match in content_query:iter_matches(dyn_body, bufnr) do
-            local content_body = content_match[2]
-            write_output("Found content block for: " .. dyn_name) -- Debug output
-            -- Parse the content block's properties and nested blocks
-            local parsed_content = parse_block_contents(content_body)
-            write_output("Parsed properties: " .. vim.inspect(vim.tbl_keys(parsed_content.properties)))         -- Debug output
-            write_output("Parsed blocks: " .. vim.inspect(vim.tbl_keys(parsed_content.blocks)))                 -- Debug output
-            write_output("Parsed dynamic blocks: " .. vim.inspect(vim.tbl_keys(parsed_content.dynamic_blocks))) -- Debug output
-            block_data.dynamic_blocks[dyn_name] = parsed_content
-          end
-        end
-        return block_data
+        table.insert(resources, resource)
       end
-
-      -- Parse the resource body
-      local parsed_data = parse_block_contents(body_node)
-      resource.properties = parsed_data.properties
-      resource.blocks = parsed_data.blocks
-      resource.dynamic_blocks = parsed_data.dynamic_blocks
-      table.insert(resources, resource)
     end
-    ::continue::
   end
+
   return resources
 end
 
-local function validate_nested_blocks(resource_type, block_schema, block_data, block_path, output_fn, is_dynamic)
-  -- Check attributes (only if not inside a dynamic block)
-  if block_schema.attributes and not is_dynamic then
+-- Validate blocks and their contents
+local function validate_block(resource_type, block_schema, block_data, path, output_fn)
+  -- Check attributes
+  if block_schema.attributes then
     for name, attr in pairs(block_schema.attributes) do
       if not attr.computed and not block_data.properties[name] then
         if attr.required then
           output_fn(string.format("%s missing required property %s in %s",
-            resource_type, name, block_path))
-        else
-          output_fn(string.format("%s missing optional property %s in %s",
-            resource_type, name, block_path))
+            resource_type, name, path))
         end
       end
     end
@@ -306,53 +304,51 @@ local function validate_nested_blocks(resource_type, block_schema, block_data, b
   if block_schema.block_types then
     for name, block_type in pairs(block_schema.block_types) do
       if name == "timeouts" then goto continue end
+
+      -- Handle regular blocks
       local block = block_data.blocks[name]
+      if block and block_type.block then
+        validate_block(resource_type, block_type.block, block, path .. "." .. name, output_fn)
+      end
+
+      -- Handle dynamic blocks
       local dynamic_block = block_data.dynamic_blocks[name]
-
-      if block then
-        -- Regular nested block
-        if block_type.block then
-          validate_nested_blocks(resource_type, block_type.block, block, block_path .. "." .. name, output_fn, false)
-        end
-      elseif dynamic_block then
-        -- Dynamic block
-        if block_type.block then
-          -- First validate the immediate properties in the dynamic block
-          validate_nested_blocks(resource_type, block_type.block, dynamic_block, block_path .. ".dynamic." .. name,
-            output_fn, false)
-
-          -- Check for nested blocks inside dynamic block
-          if block_type.block.block_types then
-            for nested_name, nested_block_type in pairs(block_type.block.block_types) do
-              local nested_block = dynamic_block.blocks[nested_name]
-              local nested_dynamic = dynamic_block.dynamic_blocks[nested_name]
-
-              if nested_block then
-                validate_nested_blocks(resource_type, nested_block_type.block, nested_block,
-                  block_path .. ".dynamic." .. name .. "." .. nested_name, output_fn, false)
-              elseif nested_dynamic then
-                validate_nested_blocks(resource_type, nested_block_type.block, nested_dynamic,
-                  block_path .. ".dynamic." .. name .. ".dynamic." .. nested_name, output_fn, false)
-              elseif nested_block_type.min_items and nested_block_type.min_items > 0 then
-                output_fn(string.format("%s missing required block %s in %s",
-                  resource_type, nested_name, block_path .. ".dynamic." .. name))
-              else
-                output_fn(string.format("%s missing optional block %s in %s",
-                  resource_type, nested_name, block_path .. ".dynamic." .. name))
+      if dynamic_block and block_type.block then
+        -- Validate dynamic block content
+        if block_type.block.attributes then
+          for attr_name, attr in pairs(block_type.block.attributes) do
+            if not dynamic_block.properties[attr_name] and not attr.computed then
+              if attr.required then
+                output_fn(string.format("%s missing required property %s in %s.%s",
+                  resource_type, attr_name, path, name))
               end
             end
           end
         end
-      elseif not is_dynamic then
-        -- Only report missing blocks when not inside a dynamic block
-        if block_type.min_items and block_type.min_items > 0 then
-          output_fn(string.format("%s missing required block %s in %s",
-            resource_type, name, block_path))
-        else
-          output_fn(string.format("%s missing optional block %s in %s",
-            resource_type, name, block_path))
+
+        -- Validate nested blocks within dynamic block
+        if block_type.block.block_types then
+          for nested_name, nested_type in pairs(block_type.block.block_types) do
+            local nested_block = dynamic_block.blocks[nested_name]
+            local nested_dynamic = dynamic_block.dynamic_blocks[nested_name]
+
+            if nested_block then
+              validate_block(resource_type, nested_type.block, nested_block,
+                path .. "." .. name .. "." .. nested_name, output_fn)
+            elseif nested_dynamic then
+              validate_block(resource_type, nested_type.block, nested_dynamic,
+                path .. "." .. name .. ".dynamic." .. nested_name, output_fn)
+            elseif nested_type.min_items and nested_type.min_items > 0 then
+              output_fn(string.format("%s missing required block %s in %s.%s",
+                resource_type, nested_name, path, name))
+            end
+          end
         end
+      elseif block_type.min_items and block_type.min_items > 0 and not block and not dynamic_block then
+        output_fn(string.format("%s missing required block %s in %s",
+          resource_type, name, path))
       end
+
       ::continue::
     end
   end
@@ -367,7 +363,7 @@ function M.validate_resources()
     for _, resource in ipairs(resources) do
       local schema = schema_cache.resource_schemas[resource.type]
       if schema and schema.block then
-        validate_nested_blocks(resource.type, schema.block, resource, "root", write_output, false)
+        validate_block(resource.type, schema.block, resource, "root", write_output)
       end
     end
   end)
