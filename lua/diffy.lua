@@ -471,7 +471,3 @@ function M.setup()
 end
 
 return M
---   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
--- end
---
--- return M
