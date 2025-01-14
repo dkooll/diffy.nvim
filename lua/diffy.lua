@@ -1,18 +1,10 @@
---------------------------------------------------------------------------------
--- File: terraform_schema_validator.lua
--- Description: Terraform schema validator plugin for Neovim
---------------------------------------------------------------------------------
-
 local M = {}
 -- Cache for provider schemas
 local schema_cache = {}
 local output_bufnr = nil
 local output_winid = nil
 
--- ──────────────────────────────────────────────────────────────────────────────
---                             UI Helpers
--- ──────────────────────────────────────────────────────────────────────────────
-
+--- Create or get the dedicated output buffer
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
     output_bufnr = vim.api.nvim_create_buf(false, true)
@@ -24,6 +16,7 @@ local function ensure_output_buffer()
   return output_bufnr
 end
 
+--- Ensure the output buffer is visible in a split window
 local function ensure_output_window()
   if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
     local current_win = vim.api.nvim_get_current_win()
@@ -39,6 +32,7 @@ local function ensure_output_window()
   return output_winid
 end
 
+--- Print lines to the output buffer
 local function write_output(lines, clear)
   if clear then
     vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
@@ -55,10 +49,11 @@ local function write_output(lines, clear)
   vim.cmd("redraw")
 end
 
--- ──────────────────────────────────────────────────────────────────────────────
---                             Schema Fetching
--- ──────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────────
+--                       Terraform Schema Fetching
+-- ─────────────────────────────────────────────────────────────────────────────
 
+--- Check if the HCL Tree-Sitter parser is available
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
@@ -68,6 +63,7 @@ local function ensure_hcl_parser()
   return true
 end
 
+--- Create a temporary directory
 local function create_temp_dir()
   local handle = io.popen("mktemp -d")
   if handle then
@@ -78,6 +74,7 @@ local function create_temp_dir()
   return nil
 end
 
+--- Clean up a directory, printing success/fail
 local function cleanup(temp_dir)
   if temp_dir then
     vim.fn.system({ "rm", "-rf", temp_dir })
@@ -89,7 +86,7 @@ local function cleanup(temp_dir)
   end
 end
 
---- Fetches the entire schema from "terraform providers schema -json"
+--- Download and parse the Terraform provider schema JSON
 function M.fetch_schema(callback)
   write_output({}, true)
   local temp_dir = create_temp_dir()
@@ -98,7 +95,7 @@ function M.fetch_schema(callback)
     return
   end
 
-  -- Minimal TF config
+  -- Minimal Terraform config
   local config_file = temp_dir .. "/main.tf"
   local f = io.open(config_file, "w")
   if not f then
@@ -142,6 +139,7 @@ terraform {
         return
       end
 
+      -- Once "terraform init" succeeds, fetch the providers schema
       vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
         cwd = temp_dir,
         stdout_buffered = true,
@@ -152,7 +150,7 @@ terraform {
             if success then
               schema_cache = decoded.provider_schemas["registry.terraform.io/hashicorp/azurerm"] or {}
               if callback then
-                write_output({ "" }) -- blank line
+                write_output({ "" }) -- Blank line
                 callback()
               end
             else
@@ -183,101 +181,94 @@ terraform {
   end
 end
 
--- ──────────────────────────────────────────────────────────────────────────────
---                          Parsing the Current Buffer
--- ──────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────────
+--                       Tree-Sitter Parsing Logic
+-- ─────────────────────────────────────────────────────────────────────────────
 
---- Utility to parse arrays from an attribute node, e.g. ignore_changes = [ a, b, c ]
+--- Minimal parser for `ignore_changes = [ contact, "foo" ]`
+--  Gathers the item names out of the bracket list.
 local function parse_ignore_changes_array(node, bufnr)
-  -- This is minimal, checks for top-level array items (strings or identifiers).
-  local result = {}
+  local results = {}
 
-  -- For simplicity, we’ll do a quick Tree-Sitter query that finds expressions in a bracket-list:
-  --   [ (expression) @item (expression) @item ... ]
   local bracket_query = vim.treesitter.query.parse("hcl", [[
     (attribute
       (identifier) @attr_name
       (expression
         (collection_value
           (tuple
-            (expression) @item+)))  ; gather all items
+            (expression) @item+)))
     )
   ]])
-  -- We only run this query on the node that we know is "ignore_changes".
+
   for _, match, _ in bracket_query:iter_matches(node, bufnr) do
     local attr_node = match[1]
     local attr_name = vim.treesitter.get_node_text(attr_node, bufnr)
     if attr_name == "ignore_changes" then
-      local items = { select(2, next(match)) } -- skip the first capture "attr_name"
-      for _, item_node in ipairs(items) do
-        if item_node then
-          local text = vim.treesitter.get_node_text(item_node, bufnr)
-          -- text might be unquoted or quoted. If it's quoted, remove quotes
-          text = text:gsub('^"', ""):gsub('"$', "")
-          table.insert(result, text)
-        end
+      -- All other captures in `match` are the @item captures
+      for idx = 2, #match do
+        local item_node = match[idx]
+        local txt = vim.treesitter.get_node_text(item_node, bufnr)
+        -- If it's quoted, strip quotes
+        txt = txt:gsub('^"(.*)"$', "%1")
+        table.insert(results, txt)
       end
     end
   end
-  return result
+
+  return results
 end
 
---- Recursively parse "body" nodes for attributes, blocks, dynamic blocks, etc.
+--- Recursively parse blocks, dynamic blocks, and record lifecycle.ignore_changes
 local function parse_block_contents(node, bufnr)
   local block_data = {
-    properties = {},     -- top-level attributes
-    blocks = {},         -- sub-blocks
-    dynamic_blocks = {}, -- dynamic "foo" { ... }
-    ignore_changes = {}, -- array of property-names to ignore
+    properties = {},
+    blocks = {},
+    dynamic_blocks = {},
+    ignore_changes = {}, -- store property/block names from lifecycle.ignore_changes
   }
 
-  -- Query for normal attributes: (attribute (identifier) @name)
+  -- 1) Normal attributes
   local attr_query = vim.treesitter.query.parse("hcl", [[
     (attribute (identifier) @name)
   ]])
-  for _, attr_match in attr_query:iter_matches(node, bufnr) do
-    local name_node = attr_match[1]
-    local name_text = vim.treesitter.get_node_text(name_node, bufnr)
-    block_data.properties[name_text] = true
+  for _, match, _ in attr_query:iter_matches(node, bufnr) do
+    local name_node = match[1]
+    local name_txt = vim.treesitter.get_node_text(name_node, bufnr)
+    block_data.properties[name_txt] = true
   end
 
-  -- Query for normal blocks: (block (identifier) @name (body) @body)
+  -- 2) Regular blocks (non-dynamic)
   local block_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @name
       (body) @body)
   ]])
-  for _, bmatch in block_query:iter_matches(node, bufnr) do
+  for _, bmatch, _ in block_query:iter_matches(node, bufnr) do
     local name_node = bmatch[1]
     local body_node = bmatch[2]
-    local name_text = vim.treesitter.get_node_text(name_node, bufnr)
+    local name_txt = vim.treesitter.get_node_text(name_node, bufnr)
 
-    if name_text == "dynamic" then
-      goto continue
+    if name_txt == "dynamic" then
+      goto continue_block
     end
 
-    -- If it's a "lifecycle" block, we specifically check for ignore_changes
-    if name_text == "lifecycle" then
-      -- parse the lifecycle block normally
+    if name_txt == "lifecycle" then
+      -- If there's a lifecycle block, parse it to check ignore_changes
       local lifecycle_data = parse_block_contents(body_node, bufnr)
-      -- If the "lifecycle" block has an attribute "ignore_changes" = [...]
-      -- parse that array to fill block_data.ignore_changes
       if lifecycle_data.properties["ignore_changes"] then
-        -- parse the array from the entire block node
         local arr = parse_ignore_changes_array(body_node, bufnr)
-        for _, ignored_prop in ipairs(arr) do
-          table.insert(block_data.ignore_changes, ignored_prop)
+        for _, ignored in ipairs(arr) do
+          table.insert(block_data.ignore_changes, ignored)
         end
       end
-      goto continue
+      goto continue_block
     end
 
-    -- otherwise parse as a normal sub-block
-    block_data.blocks[name_text] = parse_block_contents(body_node, bufnr)
-    ::continue::
+    block_data.blocks[name_txt] = parse_block_contents(body_node, bufnr)
+    ::continue_block::
   end
 
-  -- Query for dynamic blocks: dynamic "foo" { ... }
+  -- 3) Dynamic blocks: dynamic "something" { content { ... } }
   local dynamic_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @dyn_kw
@@ -285,56 +276,55 @@ local function parse_block_contents(node, bufnr)
       (body) @dyn_body
       (#eq? @dyn_kw "dynamic"))
   ]])
-  for _, dyn_match in dynamic_query:iter_matches(node, bufnr) do
-    local dyn_name_node = dyn_match[2]
-    local dyn_body_node = dyn_match[3]
-    local dyn_name = vim.treesitter.get_node_text(dyn_name_node, bufnr):gsub('"', "")
+  for _, dmatch, _ in dynamic_query:iter_matches(node, bufnr) do
+    local dyn_name_node = dmatch[2]
+    local dyn_body_node = dmatch[3]
+    local dyn_name_txt = vim.treesitter.get_node_text(dyn_name_node, bufnr):gsub('"', "")
 
-    -- Look for a "content { ... }" block inside
+    -- See if there's a content block
     local content_query = vim.treesitter.query.parse("hcl", [[
       (block
-        (identifier) @name
-        (body) @body
-        (#eq? @name "content"))
+        (identifier) @content_kw
+        (body) @content_body
+        (#eq? @content_kw "content"))
     ]])
     local found_content = false
-    for _, content_match in content_query:iter_matches(dyn_body_node, bufnr) do
+    for _, cmatch, _ in content_query:iter_matches(dyn_body_node, bufnr) do
       found_content = true
-      local content_body_node = content_match[2]
-      -- parse content { ... } body
+      local content_body_node = cmatch[2]
       local content_data = parse_block_contents(content_body_node, bufnr)
-      -- Merge those attributes/blocks/dynamic_blocks into the dynamic block
-      block_data.dynamic_blocks[dyn_name] = block_data.dynamic_blocks[dyn_name] or {
+
+      -- Merge "content" data into the dynamic block
+      block_data.dynamic_blocks[dyn_name_txt] = block_data.dynamic_blocks[dyn_name_txt] or {
         properties = {},
         blocks = {},
         dynamic_blocks = {},
         ignore_changes = {},
       }
-      -- Merge each table:
       for k, v in pairs(content_data.properties) do
-        block_data.dynamic_blocks[dyn_name].properties[k] = v
+        block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
       end
       for k, v in pairs(content_data.blocks) do
-        block_data.dynamic_blocks[dyn_name].blocks[k] = v
+        block_data.dynamic_blocks[dyn_name_txt].blocks[k] = v
       end
       for k, v in pairs(content_data.dynamic_blocks) do
-        block_data.dynamic_blocks[dyn_name].dynamic_blocks[k] = v
+        block_data.dynamic_blocks[dyn_name_txt].dynamic_blocks[k] = v
       end
-      for _, ign in ipairs(content_data.ignore_changes) do
-        table.insert(block_data.dynamic_blocks[dyn_name].ignore_changes, ign)
+      for _, ic in ipairs(content_data.ignore_changes) do
+        table.insert(block_data.dynamic_blocks[dyn_name_txt].ignore_changes, ic)
       end
     end
 
     if not found_content then
-      -- If there's no "content" block, parse the entire dyn_body
-      block_data.dynamic_blocks[dyn_name] = parse_block_contents(dyn_body_node, bufnr)
+      -- If no content block, parse the entire dyn_body as fallback
+      block_data.dynamic_blocks[dyn_name_txt] = parse_block_contents(dyn_body_node, bufnr)
     end
   end
 
   return block_data
 end
 
---- Top-level: parse the current buffer for `resource "TYPE" "NAME" { ... }`.
+--- Top-level parse for resource "X" "Y" { ... } blocks.
 function M.parse_current_buffer()
   if not ensure_hcl_parser() then
     return {}
@@ -354,17 +344,16 @@ function M.parse_current_buffer()
       (identifier) @block_type
       (string_lit) @resource_type
       (string_lit) @resource_name
-      (body) @body
-    )
+      (body) @body)
   ]])
-
   for _, captures, _ in resource_query:iter_matches(root, bufnr) do
     local block_type_node = captures[1]
     local resource_type_node = captures[2]
     local body_node = captures[4]
     if not (block_type_node and resource_type_node and body_node) then
-      goto continue
+      goto continue_res
     end
+
     local block_type_txt = vim.treesitter.get_node_text(block_type_node, bufnr)
     if block_type_txt == "resource" then
       local resource_type_txt = vim.treesitter.get_node_text(resource_type_node, bufnr):gsub('"', "")
@@ -374,44 +363,54 @@ function M.parse_current_buffer()
         properties = parsed_data.properties,
         blocks = parsed_data.blocks,
         dynamic_blocks = parsed_data.dynamic_blocks,
-        ignore_changes = parsed_data.ignore_changes or {},
+        ignore_changes = parsed_data.ignore_changes,
       })
     end
-    ::continue::
+    ::continue_res::
   end
+
   return resources
 end
 
--- ──────────────────────────────────────────────────────────────────────────────
---                          Validation Logic
--- ──────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────────
+--                      Validation Against the Schema
+-- ─────────────────────────────────────────────────────────────────────────────
 
 function M.validate_resources()
-  write_output({}, true) -- clear old output
+  write_output({}, true)
 
   M.fetch_schema(function()
     local resources = M.parse_current_buffer()
     for _, resource in ipairs(resources) do
       local schema = schema_cache.resource_schemas[resource.type]
       if not (schema and schema.block) then
-        -- Optionally note that no schema was found
-        -- write_output("No schema found for resource type " .. resource.type)
-        goto continue_resource
+        -- optionally note no schema found
+        -- write_output("No schema found for " .. resource.type)
+        goto continue_resources
       end
 
-      local function validate_block_attributes(block_schema, block_data, block_path, ignore_list)
-        ignore_list = ignore_list or {}
+      local function validate_block_attributes(block_schema, block_data, block_path, inherited_ignores)
+        inherited_ignores = inherited_ignores or {}
 
-        -- 1) Check attributes
+        -- Merge local ignore_changes
+        local combined_ignores = {}
+        for _, v in ipairs(inherited_ignores) do
+          table.insert(combined_ignores, v)
+        end
+        for _, v in ipairs(block_data.ignore_changes or {}) do
+          table.insert(combined_ignores, v)
+        end
+
+        -- 1) Attributes
         if block_schema.attributes then
-          for attr_name, attr_schema in pairs(block_schema.attributes) do
-            -- If this attribute is in ignore_changes, skip it
-            if vim.tbl_contains(ignore_list, attr_name) then
+          for attr_name, attr_info in pairs(block_schema.attributes) do
+            -- Skip if in ignore_changes
+            if vim.tbl_contains(combined_ignores, attr_name) then
               goto continue_attr
             end
 
-            if not attr_schema.computed and not block_data.properties[attr_name] then
-              if attr_schema.required then
+            if not attr_info.computed and not block_data.properties[attr_name] then
+              if attr_info.required then
                 write_output(string.format(
                   "%s missing required property %s in %s",
                   resource.type, attr_name, block_path
@@ -427,40 +426,42 @@ function M.validate_resources()
           end
         end
 
-        -- 2) Check nested blocks
+        -- 2) Nested blocks
         if block_schema.block_types then
-          for block_name, block_type in pairs(block_schema.block_types) do
+          for block_name, btype_schema in pairs(block_schema.block_types) do
             if block_name == "timeouts" then
               goto continue_block
             end
+
+            -- If block_name is in ignore_changes, skip it
+            if vim.tbl_contains(combined_ignores, block_name) then
+              goto continue_block
+            end
+
             local sub_block = block_data.blocks[block_name]
             local dyn_block = block_data.dynamic_blocks[block_name]
 
-            -- Combine ignore_changes from the current block_data
-            local combined_ignore = {}
-            for _, v in ipairs(ignore_list) do
-              table.insert(combined_ignore, v)
-            end
-            for _, v in ipairs(block_data.ignore_changes) do
-              table.insert(combined_ignore, v)
-            end
-
             if sub_block then
-              if block_type.block then
+              if btype_schema.block then
                 validate_block_attributes(
-                  block_type.block, sub_block, block_path .. "." .. block_name, combined_ignore
+                  btype_schema.block,
+                  sub_block,
+                  block_path .. "." .. block_name,
+                  combined_ignores
                 )
               end
             elseif dyn_block then
-              -- For dynamic blocks, we just validate the parsed content
-              if block_type.block then
+              if btype_schema.block then
                 validate_block_attributes(
-                  block_type.block, dyn_block, block_path .. ".dynamic." .. block_name, combined_ignore
+                  btype_schema.block,
+                  dyn_block,
+                  block_path .. ".dynamic." .. block_name,
+                  combined_ignores
                 )
               end
             else
-              -- If neither sub_block nor dyn_block
-              if block_type.min_items and block_type.min_items > 0 then
+              -- If neither a normal block nor a dynamic block
+              if btype_schema.min_items and btype_schema.min_items > 0 then
                 write_output(string.format(
                   "%s missing required block %s in %s",
                   resource.type, block_name, block_path
@@ -478,18 +479,14 @@ function M.validate_resources()
       end
 
       validate_block_attributes(schema.block, resource, "root", resource.ignore_changes)
-      ::continue_resource::
+      ::continue_resources::
     end
   end)
 end
 
-function M.setup(_)
+function M.setup()
   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 end
-
--- function M.setup(_opts)
---   vim.api.nvim_create_user_command("TerraformValidateSchema", M.vlidate_resources, {})
--- end
 
 return M
 
@@ -884,6 +881,10 @@ return M
 --
 -- function M.setup(opts)
 --   opts = opts or {}
+--   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
+-- end
+--
+-- return M
 --   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 -- end
 --
