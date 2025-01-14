@@ -255,13 +255,20 @@ function M.parse_current_buffer()
         for _, dyn_match in dynamic_query:iter_matches(node, bufnr) do
           local dyn_name = vim.treesitter.get_node_text(dyn_match[2], bufnr):gsub('"', '')
           local dyn_body = dyn_match[3]
+          write_output("Found dynamic block: " .. dyn_name) -- Debug output
+
           -- Look for content block inside dynamic block
           local content_query = vim.treesitter.query.parse("hcl",
             "(block (identifier) @name (body) @body (#eq? @name \"content\"))")
           for _, content_match in content_query:iter_matches(dyn_body, bufnr) do
             local content_body = content_match[2]
+            write_output("Found content block for: " .. dyn_name) -- Debug output
             -- Parse the content block's properties and nested blocks
-            block_data.dynamic_blocks[dyn_name] = parse_block_contents(content_body)
+            local parsed_content = parse_block_contents(content_body)
+            write_output("Parsed properties: " .. vim.inspect(vim.tbl_keys(parsed_content.properties)))         -- Debug output
+            write_output("Parsed blocks: " .. vim.inspect(vim.tbl_keys(parsed_content.blocks)))                 -- Debug output
+            write_output("Parsed dynamic blocks: " .. vim.inspect(vim.tbl_keys(parsed_content.dynamic_blocks))) -- Debug output
+            block_data.dynamic_blocks[dyn_name] = parsed_content
           end
         end
         return block_data
