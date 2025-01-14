@@ -310,8 +310,9 @@ local function validate_nested_blocks(resource_type, block_schema, block_data, b
       elseif dynamic_block then
         -- Dynamic block
         if block_type.block then
-          validate_nested_blocks(resource_type, block_type.block, dynamic_block, block_path .. "." .. name, output_fn,
-            true)
+          -- First validate the immediate properties in the dynamic block
+          validate_nested_blocks(resource_type, block_type.block, dynamic_block, block_path .. ".dynamic." .. name,
+            output_fn, false)
 
           -- Check for nested blocks inside dynamic block
           if block_type.block.block_types then
@@ -321,10 +322,16 @@ local function validate_nested_blocks(resource_type, block_schema, block_data, b
 
               if nested_block then
                 validate_nested_blocks(resource_type, nested_block_type.block, nested_block,
-                  block_path .. "." .. name .. "." .. nested_name, output_fn, false)
+                  block_path .. ".dynamic." .. name .. "." .. nested_name, output_fn, false)
               elseif nested_dynamic then
                 validate_nested_blocks(resource_type, nested_block_type.block, nested_dynamic,
-                  block_path .. "." .. name .. "." .. nested_name, output_fn, true)
+                  block_path .. ".dynamic." .. name .. ".dynamic." .. nested_name, output_fn, false)
+              elseif nested_block_type.min_items and nested_block_type.min_items > 0 then
+                output_fn(string.format("%s missing required block %s in %s",
+                  resource_type, nested_name, block_path .. ".dynamic." .. name))
+              else
+                output_fn(string.format("%s missing optional block %s in %s",
+                  resource_type, nested_name, block_path .. ".dynamic." .. name))
               end
             end
           end
