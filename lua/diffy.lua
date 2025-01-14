@@ -19,21 +19,14 @@ end
 -- Function to ensure output window is visible
 local function ensure_output_window()
   if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
-    -- Save current window
     local current_win = vim.api.nvim_get_current_win()
-
-    -- Create split and set options
     vim.cmd('botright split')
     output_winid = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(output_winid, ensure_output_buffer())
     vim.api.nvim_win_set_height(output_winid, 20)
-
-    -- Set window options
     vim.wo[output_winid].wrap = false
     vim.wo[output_winid].number = false
     vim.wo[output_winid].relativenumber = false
-
-    -- Return to original window
     vim.api.nvim_set_current_win(current_win)
   end
   return output_winid
@@ -44,16 +37,13 @@ local function write_output(lines, clear)
   if clear then
     vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
   end
-
   if type(lines) == "string" then
     lines = { lines }
   end
-
   local buf = ensure_output_buffer()
   local line_count = vim.api.nvim_buf_line_count(buf)
   vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, lines)
 
-  -- Ensure window is visible and scroll to bottom
   local win = ensure_output_window()
   vim.api.nvim_win_set_cursor(win, { line_count + #lines, 0 })
   vim.cmd('redraw')
@@ -85,7 +75,7 @@ local function cleanup(temp_dir)
   if temp_dir then
     vim.fn.system({ 'rm', '-rf', temp_dir })
     if vim.v.shell_error == 0 then
-      write_output({ "", "Cleaning up files succeeded" }) -- Add blank line before cleanup status
+      write_output({ "", "Cleaning up files succeeded" })
     else
       write_output({ "", "Cleaning up files failed" })
     end
@@ -94,7 +84,6 @@ end
 
 -- Function to handle terraform initialization and schema fetching
 function M.fetch_schema(callback)
-  -- Clear output and show window
   write_output({}, true)
 
   local temp_dir = create_temp_dir()
@@ -103,7 +92,6 @@ function M.fetch_schema(callback)
     return
   end
 
-  -- Create minimal terraform configuration
   local config_file = temp_dir .. "/main.tf"
   local f = io.open(config_file, "w")
   if not f then
@@ -111,7 +99,15 @@ function M.fetch_schema(callback)
     write_output("Failed to create temporary configuration")
     return
   end
-  f:write('terraform {\n  required_providers {\n    azurerm = {\n      source = "hashicorp/azurerm"\n    }\n  }\n}\n')
+  f:write([[
+terraform {
+  required_providers {
+    azurerm = {
+      source = "hashicorp/azurerm"
+    }
+  }
+}
+]])
   f:close()
 
   -- Run terraform init
@@ -220,29 +216,32 @@ function M.parse_current_buffer()
         dynamic_blocks = {}
       }
 
+      -- Recursively parse the body of a block
       local function parse_block_contents(node)
         local block_data = {
           properties = {},
           blocks = {},
           dynamic_blocks = {}
         }
-        -- Query for attributes
+
+        -- 1. Find normal attributes
         local attr_query = vim.treesitter.query.parse("hcl", "(attribute (identifier) @name)")
         for _, attr_match in attr_query:iter_matches(node, bufnr) do
           local name = vim.treesitter.get_node_text(attr_match[1], bufnr)
           block_data.properties[name] = true
         end
-        -- Query for regular blocks
+
+        -- 2. Find regular (non-dynamic) blocks
         local block_query = vim.treesitter.query.parse("hcl", "(block (identifier) @name (body) @body)")
         for _, block_match in block_query:iter_matches(node, bufnr) do
           local name = vim.treesitter.get_node_text(block_match[1], bufnr)
           local body = block_match[2]
           if name ~= "dynamic" then
-            -- Parse the block's contents recursively
             block_data.blocks[name] = parse_block_contents(body)
           end
         end
-        -- Query for dynamic blocks
+
+        -- 3. Find dynamic blocks: dynamic "something" { ... }
         local dynamic_query = vim.treesitter.query.parse("hcl", [[
           (block
             (identifier) @type
@@ -253,31 +252,70 @@ function M.parse_current_buffer()
         for _, dyn_match in dynamic_query:iter_matches(node, bufnr) do
           local dyn_name = vim.treesitter.get_node_text(dyn_match[2], bufnr):gsub('"', '')
           local dyn_body = dyn_match[3]
-          -- Look for content block inside dynamic block
-          local content_query = vim.treesitter.query.parse("hcl",
-            "(block (identifier) @name (body) @body (#eq? @name \"content\"))")
+
+          -- Look for a "content" block inside this dynamic block
+          local content_query = vim.treesitter.query.parse("hcl", [[
+            (block
+              (identifier) @name
+              (body) @body
+              (#eq? @name "content"))
+          ]])
           local found_content = false
           for _, content_match in content_query:iter_matches(dyn_body, bufnr) do
-            local content_body = content_match[2]
-            -- Parse the content block's properties and nested blocks
-            block_data.dynamic_blocks[dyn_name] = parse_block_contents(content_body)
             found_content = true
+            local content_body = content_match[2]
+
+            ------------------------------------------------------------------
+            -- Here's the key difference:
+            -- Instead of storing parse_block_contents(content_body) as a
+            -- *nested* sub-block, we MERGE it back into this dynamic block's
+            -- properties/blocks. Because from Terraform's perspective,
+            -- "content" is the actual body of the dynamic block.
+            ------------------------------------------------------------------
+            local content_data = parse_block_contents(content_body)
+
+            -- Merge "content" attributes into the dynamic block's top-level
+            for k, v in pairs(content_data.properties) do
+              block_data.dynamic_blocks[dyn_name] = block_data.dynamic_blocks[dyn_name] or {
+                properties = {},
+                blocks = {},
+                dynamic_blocks = {}
+              }
+              block_data.dynamic_blocks[dyn_name].properties[k] = v
+            end
+            for k, v in pairs(content_data.blocks) do
+              block_data.dynamic_blocks[dyn_name] = block_data.dynamic_blocks[dyn_name] or {
+                properties = {},
+                blocks = {},
+                dynamic_blocks = {}
+              }
+              block_data.dynamic_blocks[dyn_name].blocks[k] = v
+            end
+            for k, v in pairs(content_data.dynamic_blocks) do
+              block_data.dynamic_blocks[dyn_name] = block_data.dynamic_blocks[dyn_name] or {
+                properties = {},
+                blocks = {},
+                dynamic_blocks = {}
+              }
+              block_data.dynamic_blocks[dyn_name].dynamic_blocks[k] = v
+            end
           end
 
-          -- If there's NO content block, we still want a record that the dynamic block existed
-          -- so we can validate. We'll parse the entire dyn_body in that case.
+          -- If there's no "content" block at all, parse the entire dyn_body
+          -- so that we still pick up any attributes at the dynamic level
           if not found_content then
             block_data.dynamic_blocks[dyn_name] = parse_block_contents(dyn_body)
           end
         end
+
         return block_data
       end
 
-      -- Parse the resource body
       local parsed_data = parse_block_contents(body_node)
       resource.properties = parsed_data.properties
       resource.blocks = parsed_data.blocks
       resource.dynamic_blocks = parsed_data.dynamic_blocks
+
       table.insert(resources, resource)
     end
     ::continue::
@@ -296,68 +334,49 @@ function M.validate_resources()
       local schema = schema_cache.resource_schemas[resource.type]
       if schema and schema.block then
         local function validate_block_attributes(block_schema, block_data, block_path)
-          -- Check attributes
+          -- 1. Check attributes
           if block_schema.attributes then
             for name, attr in pairs(block_schema.attributes) do
               if not attr.computed and not block_data.properties[name] then
                 if attr.required then
-                  write_output(string.format(
-                    "%s missing required property %s in %s",
-                    resource.type, name, block_path
-                  ))
+                  write_output(string.format("%s missing required property %s in %s",
+                    resource.type, name, block_path))
                 else
-                  write_output(string.format(
-                    "%s missing optional property %s in %s",
-                    resource.type, name, block_path
-                  ))
+                  write_output(string.format("%s missing optional property %s in %s",
+                    resource.type, name, block_path))
                 end
               end
             end
           end
-          -- Check nested blocks
+
+          -- 2. Check nested blocks
           if block_schema.block_types then
             for name, block_type in pairs(block_schema.block_types) do
               if name == "timeouts" then goto continue end
-
               local block = block_data.blocks[name]
               local dynamic_block = block_data.dynamic_blocks[name]
 
               if block then
-                -- Validate nested block attributes
                 if block_type.block then
-                  validate_block_attributes(
-                    block_type.block, block, block_path .. "." .. name
-                  )
+                  validate_block_attributes(block_type.block, block, block_path .. "." .. name)
                 end
               elseif dynamic_block then
-                -- ---------------------------------------------
-                -- Removed the skip for multiple dynamic blocks!
-                -- ---------------------------------------------
-                -- If you truly want to skip only if there's more
-                -- than one dynamic block, comment-out this check
-                -- or remove it entirely:
-                -- if count_dynamic_blocks(resource) > 1 then
-                --   goto continue
-                -- end
+                -- Remove/disable the bail-out for multiple dynamic blocks
+                -- so nested blocks are always validated:
+                -- if count_dynamic_blocks(resource) > 1 then goto continue end
 
-                -- Validate dynamic block content attributes
                 if block_type.block then
                   validate_block_attributes(
                     block_type.block, dynamic_block, block_path .. ".dynamic." .. name
                   )
                 end
               else
-                -- If neither a regular block nor a dynamic block is present
                 if block_type.min_items and block_type.min_items > 0 then
-                  write_output(string.format(
-                    "%s missing required block %s in %s",
-                    resource.type, name, block_path
-                  ))
+                  write_output(string.format("%s missing required block %s in %s",
+                    resource.type, name, block_path))
                 else
-                  write_output(string.format(
-                    "%s missing optional block %s in %s",
-                    resource.type, name, block_path
-                  ))
+                  write_output(string.format("%s missing optional block %s in %s",
+                    resource.type, name, block_path))
                 end
               end
               ::continue::
@@ -365,7 +384,6 @@ function M.validate_resources()
           end
         end
 
-        -- Start validation from the root
         validate_block_attributes(schema.block, resource, "root")
       end
     end
