@@ -27,10 +27,29 @@ local function ensure_output_window()
     vim.wo[output_winid].wrap = false
     vim.wo[output_winid].number = false
     vim.wo[output_winid].relativenumber = false
+    vim.cmd("hi MyOutputHighlight guifg=#ffffff guibg=NONE")
+    vim.wo[output_winid].winhl = "Normal:MyOutputHighlight"
+
     vim.api.nvim_set_current_win(current_win)
   end
   return output_winid
 end
+
+--- Ensure the output buffer is visible in a split window
+-- local function ensure_output_window()
+--   if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
+--     local current_win = vim.api.nvim_get_current_win()
+--     vim.cmd("botright split")
+--     output_winid = vim.api.nvim_get_current_win()
+--     vim.api.nvim_win_set_buf(output_winid, ensure_output_buffer())
+--     vim.api.nvim_win_set_height(output_winid, 20)
+--     vim.wo[output_winid].wrap = false
+--     vim.wo[output_winid].number = false
+--     vim.wo[output_winid].relativenumber = false
+--     vim.api.nvim_set_current_win(current_win)
+--   end
+--   return output_winid
+-- end
 
 --- Print lines to the output buffer
 local function write_output(lines, clear)
