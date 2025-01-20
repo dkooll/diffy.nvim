@@ -251,6 +251,10 @@ end
 function M.fetch_schema(callback)
   write_output({}, true)
 
+  -- Buffer to collect all stdout data
+  local schema_stdout = {}
+  local schema_stderr = {}
+
   -- First, run `terraform init` in the current directory
   local init_job = vim.fn.jobstart({ "terraform", "init" }, {
     stdout_buffered = false, -- Enable real-time output
@@ -278,38 +282,56 @@ function M.fetch_schema(callback)
       end
 
       -- If terraform init is successful, fetch **all** providers' schemas
-      vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
-        stdout_buffered = false, -- Enable real-time output
-        stderr_buffered = false, -- Enable real-time error output
-        on_stdout = function(_, data2)
-          if data2 and #data2 > 0 then
-            local json_str = table.concat(data2, "\n")
-            local success, decoded = pcall(vim.json.decode, json_str)
-            if success then
-              -- Store everything in schema_cache
-              schema_cache = decoded.provider_schemas or {}
-              if callback then
-                write_output({ "" }) -- blank line
-                callback()
-              end
-            else
-              write_output("Failed to parse schema JSON.")
+      local schema_job = vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
+        stdout_buffered = false, -- We'll handle buffering ourselves
+        stderr_buffered = false,
+        on_stdout = function(_, data)
+          if data and #data > 0 then
+            for _, line in ipairs(data) do
+              table.insert(schema_stdout, line)
             end
           end
         end,
-        on_stderr = function(_, data2)
-          if data2 and #data2 > 0 then
-            write_output(vim.tbl_filter(function(line)
-              return line and line ~= ""
-            end, data2))
+        on_stderr = function(_, data)
+          if data and #data > 0 then
+            for _, line in ipairs(data) do
+              table.insert(schema_stderr, line)
+            end
           end
         end,
         on_exit = function(_, schema_exit_code)
           if schema_exit_code ~= 0 then
             write_output("Failed to fetch providers schema.")
+            -- Optionally, you can also output the stderr messages
+            if #schema_stderr > 0 then
+              write_output(vim.tbl_map(function(line)
+                return "Error: " .. line
+              end, schema_stderr))
+            end
+            return
           end
-        end
+
+          -- Concatenate all collected stdout data
+          local json_str = table.concat(schema_stdout, "\n")
+          local success, decoded = pcall(vim.json.decode, json_str)
+          if success then
+            -- Store everything in schema_cache
+            schema_cache = decoded.provider_schemas or {}
+            if callback then
+              write_output({ "" }) -- blank line
+              callback()
+            end
+          else
+            write_output("Failed to parse schema JSON.")
+            -- Optionally, you can output the problematic JSON string
+            write_output({ "Debug: " .. json_str })
+          end
+        end,
       })
+
+      if schema_job == 0 then
+        write_output("Failed to start schema fetching job.")
+      end
     end,
   })
 
@@ -449,7 +471,6 @@ function M.setup()
 end
 
 return M
-
 
 -- local M = {}
 -- -- Cache for provider schemas
