@@ -203,8 +203,7 @@ end
 function M.fetch_schema(callback)
   write_output({}, true)
 
-  local temp_dir = vim.fn.tempname()
-  vim.fn.mkdir(temp_dir)
+  local temp_dir = vim.fn.getcwd() -- Use the current working directory
 
   local init_job = vim.fn.jobstart({ "terraform", "init" }, {
     cwd = temp_dir,
@@ -227,7 +226,6 @@ function M.fetch_schema(callback)
     on_exit = function(_, exit_code)
       if exit_code ~= 0 then
         write_output("Failed to initialize Terraform")
-        cleanup(temp_dir)
         return
       end
 
@@ -257,7 +255,6 @@ function M.fetch_schema(callback)
           end
         end,
         on_exit = function(_, schema_exit_code)
-          cleanup(temp_dir)
           if schema_exit_code ~= 0 then
             write_output("Failed to fetch schema")
           end
@@ -268,7 +265,6 @@ function M.fetch_schema(callback)
 
   if init_job == 0 then
     write_output("Failed to start Terraform initialization")
-    cleanup(temp_dir)
   end
 end
 
