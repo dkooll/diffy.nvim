@@ -61,7 +61,7 @@ local function ensure_hcl_parser()
   return true
 end
 
---  Gathers the item names out of the bracket list for lifecycle.ignore_changes
+--- Gathers the item names out of the bracket list for lifecycle.ignore_changes
 local function parse_ignore_changes_array(node, bufnr)
   local results = {}
 
@@ -253,7 +253,8 @@ function M.fetch_schema(callback)
 
   -- First, run `terraform init` in the current directory
   local init_job = vim.fn.jobstart({ "terraform", "init" }, {
-    stdout_buffered = true,
+    stdout_buffered = false, -- Enable real-time output
+    stderr_buffered = false, -- Enable real-time error output
     on_stdout = function(_, data)
       if data and #data > 0 then
         write_output(vim.tbl_filter(function(line)
@@ -278,7 +279,8 @@ function M.fetch_schema(callback)
 
       -- If terraform init is successful, fetch **all** providers' schemas
       vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
-        stdout_buffered = true,
+        stdout_buffered = false, -- Enable real-time output
+        stderr_buffered = false, -- Enable real-time error output
         on_stdout = function(_, data2)
           if data2 and #data2 > 0 then
             local json_str = table.concat(data2, "\n")
