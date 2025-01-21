@@ -1,12 +1,9 @@
 local M = {}
--- Cache for provider schemas: map of provider key => { resource_schemas = {...}, etc. }
+
+-- cache for provider schemas
 local schema_cache = {}
 local output_bufnr = nil
 local output_winid = nil
-
--- =========================
--- Helpers to print messages
--- =========================
 
 --- Create or get the dedicated output buffer
 local function ensure_output_buffer()
@@ -58,11 +55,7 @@ local function write_output(lines, clear)
   vim.cmd("redraw")
 end
 
--- =========================
--- System / FS helpers
--- =========================
-
---- Create a temporary directory using mktemp -d
+--- Create a temporary directory
 local function create_temp_dir()
   local handle = io.popen("mktemp -d")
   if handle then
@@ -94,10 +87,6 @@ local function ensure_hcl_parser()
   end
   return true
 end
-
--- =========================
--- Fetch schema logic
--- =========================
 
 --- Download and parse **all** provider schemas from the local terraform.tf.
 function M.fetch_schema(callback)
@@ -196,10 +185,6 @@ function M.fetch_schema(callback)
     cleanup(temp_dir)
   end
 end
-
--- =========================
--- Parse resources from buffer
--- =========================
 
 -- Gathers item names in lifecycle.ignore_changes arrays
 local function parse_ignore_changes_array(node, bufnr)
@@ -385,10 +370,6 @@ function M.parse_current_buffer()
   return resources
 end
 
--- =========================
--- Validation logic
--- =========================
-
 function M.validate_resources()
   write_output({}, true)
 
@@ -429,14 +410,14 @@ function M.validate_resources()
                 if attr_info.required then
                   write_output(
                     string.format(
-                      "Resource %s missing required property [%s] in path [%s]",
+                      "Resource %s missing required property %s in path %s",
                       resource.type, attr_name, block_path
                     )
                   )
                 else
                   write_output(
                     string.format(
-                      "Resource %s missing optional property [%s] in path [%s]",
+                      "Resource %s missing optional property %s in path %s",
                       resource.type, attr_name, block_path
                     )
                   )
@@ -481,14 +462,14 @@ function M.validate_resources()
                 if btype_schema.min_items and btype_schema.min_items > 0 then
                   write_output(
                     string.format(
-                      "Resource %s missing **required** block [%s] in path [%s]",
+                      "Resource %s missing required block %s in path %s",
                       resource.type, block_name, block_path
                     )
                   )
                 else
                   write_output(
                     string.format(
-                      "Resource %s missing optional block [%s] in path [%s]",
+                      "Resource %s missing optional block %s in path %s",
                       resource.type, block_name, block_path
                     )
                   )
