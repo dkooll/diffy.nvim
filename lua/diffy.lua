@@ -429,7 +429,7 @@ function M.validate_resources()
                 if attr_info.required then
                   write_output(
                     string.format(
-                      "Resource %s missing **required** property [%s] in path [%s]",
+                      "Resource %s missing required property [%s] in path [%s]",
                       resource.type, attr_name, block_path
                     )
                   )
