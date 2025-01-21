@@ -1,5 +1,5 @@
 local M = {}
--- Cache for provider schemas: map of provider key => { resource_schemas = {...}, ... }
+-- Cache for provider schemas: map of provider key => { resource_schemas = {...}, etc. }
 local schema_cache = {}
 local output_bufnr = nil
 local output_winid = nil
@@ -8,6 +8,7 @@ local output_winid = nil
 -- Helpers to print messages
 -- =========================
 
+--- Create or get the dedicated output buffer
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
     output_bufnr = vim.api.nvim_create_buf(false, true)
@@ -19,6 +20,7 @@ local function ensure_output_buffer()
   return output_bufnr
 end
 
+--- Ensure the output buffer is visible in a split window
 local function ensure_output_window()
   if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
     local current_win = vim.api.nvim_get_current_win()
@@ -29,6 +31,8 @@ local function ensure_output_window()
     vim.wo[output_winid].wrap = false
     vim.wo[output_winid].number = false
     vim.wo[output_winid].relativenumber = false
+
+    -- Example highlight group usage
     vim.cmd("hi MyOutputHighlight guifg=#ffffff guibg=NONE")
     vim.wo[output_winid].winhl = "Normal:MyOutputHighlight"
 
@@ -37,6 +41,7 @@ local function ensure_output_window()
   return output_winid
 end
 
+--- Print lines to the output buffer
 local function write_output(lines, clear)
   if clear then
     vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
@@ -57,6 +62,7 @@ end
 -- System / FS helpers
 -- =========================
 
+--- Create a temporary directory using mktemp -d
 local function create_temp_dir()
   local handle = io.popen("mktemp -d")
   if handle then
@@ -67,6 +73,7 @@ local function create_temp_dir()
   return nil
 end
 
+--- Cleanup the temporary directory
 local function cleanup(temp_dir)
   if temp_dir then
     vim.fn.system({ "rm", "-rf", temp_dir })
@@ -78,6 +85,7 @@ local function cleanup(temp_dir)
   end
 end
 
+--- Ensure HCL parser is installed
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
@@ -95,15 +103,14 @@ end
 function M.fetch_schema(callback)
   write_output({}, true)
 
-  -- Make a temp dir and copy our local terraform.tf into it
+  -- Make a temp dir for ephemeral terraform init
   local temp_dir = create_temp_dir()
   if not temp_dir then
     write_output("Failed to create temporary directory")
     return
   end
 
-  -- We assume you're currently in a directory that has 'terraform.tf'
-  -- or 'main.tf' (whatever your file is called). Adjust as needed.
+  -- We assume there's a local terraform.tf in the current working dir
   local current_dir = vim.fn.getcwd()
   local local_tf = current_dir .. "/terraform.tf"
   if vim.fn.filereadable(local_tf) == 0 then
@@ -112,10 +119,15 @@ function M.fetch_schema(callback)
     return
   end
 
-  -- -- Copy local terraform.tf into the temp dir
-  -- vim.fn.copy(local_tf, temp_dir .. "/terraform.tf")
+  -- Copy local terraform.tf into the temp dir (to avoid polluting the main folder)
+  vim.fn.system({ "cp", local_tf, temp_dir .. "/terraform.tf" })
+  if vim.v.shell_error ~= 0 then
+    write_output("Failed to copy terraform.tf to temp directory.")
+    cleanup(temp_dir)
+    return
+  end
 
-  -- Initialize in the temp dir
+  -- Terraform init in the temp directory
   local init_job = vim.fn.jobstart({ "terraform", "init" }, {
     cwd = temp_dir,
     on_stdout = function(_, data)
@@ -151,7 +163,6 @@ function M.fetch_schema(callback)
             local success, decoded = pcall(vim.json.decode, json_str)
             if success and decoded and decoded.provider_schemas then
               -- We'll store ALL providers in schema_cache
-              -- Ex: schema_cache["registry.terraform.io/hashicorp/random"] = { resource_schemas = {...}, ... }
               schema_cache = decoded.provider_schemas
               if callback then
                 write_output({ "" }) -- Blank line
@@ -173,7 +184,7 @@ function M.fetch_schema(callback)
           if schema_exit_code ~= 0 then
             write_output("Failed to fetch schema")
           end
-          -- We still clean up the temp folder
+          -- Always clean up after we're done
           cleanup(temp_dir)
         end
       })
@@ -190,9 +201,10 @@ end
 -- Parse resources from buffer
 -- =========================
 
--- Gathers the item names out of the lifecycle.ignore_changes array.
+-- Gathers item names in lifecycle.ignore_changes arrays
 local function parse_ignore_changes_array(node, bufnr)
   local results = {}
+
   local bracket_query = vim.treesitter.query.parse("hcl", [[
     (attribute
       (identifier) @attr_name
@@ -217,6 +229,7 @@ local function parse_ignore_changes_array(node, bufnr)
       end
     end
   end
+
   return results
 end
 
@@ -253,6 +266,7 @@ local function parse_block_contents(node, bufnr)
     if name_txt == "dynamic" then
       goto continue_block
     end
+
     if name_txt == "lifecycle" then
       -- If there's a lifecycle block, parse it to check ignore_changes
       local lifecycle_data = parse_block_contents(body_node, bufnr)
@@ -280,7 +294,7 @@ local function parse_block_contents(node, bufnr)
     local dyn_body_node = dmatch[3]
     local dyn_name_txt = vim.treesitter.get_node_text(dyn_name_node, bufnr):gsub('"', "")
 
-    -- content block inside the dynamic
+    -- See if there's a 'content' block
     local content_query = vim.treesitter.query.parse("hcl", [[
       (block
         (identifier) @content_kw
@@ -292,13 +306,14 @@ local function parse_block_contents(node, bufnr)
       found_content = true
       local content_body_node = cmatch[2]
       local content_data = parse_block_contents(content_body_node, bufnr)
+
+      -- Merge "content" data into the dynamic block
       block_data.dynamic_blocks[dyn_name_txt] = block_data.dynamic_blocks[dyn_name_txt] or {
         properties = {},
         blocks = {},
         dynamic_blocks = {},
         ignore_changes = {},
       }
-      -- Merge data in
       for k, v in pairs(content_data.properties) do
         block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
       end
@@ -313,8 +328,8 @@ local function parse_block_contents(node, bufnr)
       end
     end
 
+    -- If no content block, parse the entire dyn_body as fallback
     if not found_content then
-      -- If no content block, parse the entire dyn_body as fallback
       block_data.dynamic_blocks[dyn_name_txt] = parse_block_contents(dyn_body_node, bufnr)
     end
   end
@@ -380,7 +395,7 @@ function M.validate_resources()
   M.fetch_schema(function()
     local resources = M.parse_current_buffer()
 
-    -- For each resource, figure out which provider's schema can validate it.
+    -- For each resource from the current buffer
     for _, resource in ipairs(resources) do
       local matching_provider_block = nil
       local matching_provider_key = nil
@@ -409,6 +424,7 @@ function M.validate_resources()
               if vim.tbl_contains(combined_ignores, attr_name) then
                 goto continue_attr
               end
+
               if not attr_info.computed and not block_data.properties[attr_name] then
                 if attr_info.required then
                   write_output(
@@ -433,11 +449,12 @@ function M.validate_resources()
           -- Validate nested blocks
           if block_schema.block_types then
             for block_name, btype_schema in pairs(block_schema.block_types) do
-              -- skip timeouts or other internal blocks as you wish
+              -- skip "timeouts" block or other internal blocks as you wish
               if block_name == "timeouts" then
                 goto continue_block
               end
 
+              -- If block_name is in ignore_changes, skip it
               if vim.tbl_contains(combined_ignores, block_name) then
                 goto continue_block
               end
@@ -460,7 +477,7 @@ function M.validate_resources()
                   combined_ignores
                 )
               else
-                -- If no normal or dynamic block provided, check min_items
+                -- If no normal or dynamic block is found, check min_items
                 if btype_schema.min_items and btype_schema.min_items > 0 then
                   write_output(
                     string.format(
@@ -494,7 +511,6 @@ function M.setup()
 end
 
 return M
-
 
 -- local M = {}
 -- -- Cache for provider schemas
