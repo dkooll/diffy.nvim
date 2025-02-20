@@ -167,18 +167,16 @@ function M.fetch_schema(callback)
   end
 end
 
-local function parse_ignore_changes_array(node, bufnr)
-  local results = {}
-  local bracket_query = vim.treesitter.query.parse("hcl", [=[
-    (attribute
-      (identifier) @attr_name
-      (expression
-        (collection_value
-          (tuple
-            --(expression) @item+)))
-((expression) @item)+)))
-    )
-  ]=])
+local bracket_query = vim.treesitter.query.parse("hcl", [=[
+  (attribute
+    (identifier) @attr_name
+    (expression
+      (collection_value
+        (tuple
+          ((expression) @item)+)))
+  )
+]=])
+
 
   for _, match, _ in bracket_query:iter_matches(node, bufnr) do
     local attr_node = match[1]
