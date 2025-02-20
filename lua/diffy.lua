@@ -175,7 +175,8 @@ local function parse_ignore_changes_array(node, bufnr)
       (expression
         (collection_value
           (tuple
-            (expression) @item+)))
+            --(expression) @item+)))
+((expression) @item)+)))
     )
   ]=])
 
