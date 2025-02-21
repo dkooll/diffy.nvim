@@ -78,9 +78,6 @@ local function ensure_hcl_parser()
   return true
 end
 
--- ----------------------------------------------------------------------
--- 1) DEFINE parse_ignore_changes_array PROPERLY
--- ----------------------------------------------------------------------
 local function parse_ignore_changes_array(node, bufnr)
   local results = {}
 
@@ -113,9 +110,6 @@ local function parse_ignore_changes_array(node, bufnr)
   return results
 end
 
--- ----------------------------------------------------------------------
--- 2) parse_block_contents (already in your snippet)
--- ----------------------------------------------------------------------
 local function parse_block_contents(node, bufnr)
   local block_data = {
     properties = {},
@@ -221,9 +215,6 @@ local function parse_block_contents(node, bufnr)
   return block_data
 end
 
--- ----------------------------------------------------------------------
--- 3) parse_current_buffer, fetch_schema, validate_resources, etc.
--- ----------------------------------------------------------------------
 function M.fetch_schema(callback)
   write_output({}, true)
   local temp_dir = create_temp_dir()
