@@ -2,13 +2,9 @@ local M = {}
 
 -- Cache for provider schemas
 local schema_cache = {}
--- Keep track of the buffer and window used for output
 local output_bufnr = nil
 local output_winid = nil
 
--- ------------------------------------------------------------------------
--- Utility: Create or get the "output" buffer
--- ------------------------------------------------------------------------
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
     output_bufnr = vim.api.nvim_create_buf(false, true)
@@ -20,9 +16,6 @@ local function ensure_output_buffer()
   return output_bufnr
 end
 
--- ------------------------------------------------------------------------
--- Utility: Create or get the "output" window
--- ------------------------------------------------------------------------
 local function ensure_output_window()
   if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
     local current_win = vim.api.nvim_get_current_win()
@@ -33,7 +26,6 @@ local function ensure_output_window()
     vim.wo[output_winid].wrap = false
     vim.wo[output_winid].number = false
     vim.wo[output_winid].relativenumber = false
-    -- Example of customizing the highlight
     vim.cmd("hi MyOutputHighlight guifg=#ffffff guibg=NONE")
     vim.wo[output_winid].winhl = "Normal:MyOutputHighlight"
     vim.api.nvim_set_current_win(current_win)
@@ -41,9 +33,6 @@ local function ensure_output_window()
   return output_winid
 end
 
--- ------------------------------------------------------------------------
--- Utility: Write lines to our output window
--- ------------------------------------------------------------------------
 local function write_output(lines, clear)
   if clear then
     vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
@@ -59,9 +48,6 @@ local function write_output(lines, clear)
   vim.cmd("redraw")
 end
 
--- ------------------------------------------------------------------------
--- Utility: Create a temporary directory (mktemp -d)
--- ------------------------------------------------------------------------
 local function create_temp_dir()
   local handle = io.popen("mktemp -d")
   if handle then
@@ -72,9 +58,6 @@ local function create_temp_dir()
   return nil
 end
 
--- ------------------------------------------------------------------------
--- Utility: Clean up that temporary directory
--- ------------------------------------------------------------------------
 local function cleanup(temp_dir)
   if temp_dir then
     vim.fn.system({ "rm", "-rf", temp_dir })
@@ -86,9 +69,6 @@ local function cleanup(temp_dir)
   end
 end
 
--- ------------------------------------------------------------------------
--- Utility: Check for HCL parser installed
--- ------------------------------------------------------------------------
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
@@ -98,19 +78,13 @@ local function ensure_hcl_parser()
   return true
 end
 
--- ------------------------------------------------------------------------
--- 1) Parse "ignore_changes" arrays
---   We only attempt this if filetype is hcl/terraform/tf
--- ------------------------------------------------------------------------
+-- ----------------------------------------------------------------------
+-- 1) DEFINE parse_ignore_changes_array PROPERLY
+-- ----------------------------------------------------------------------
 local function parse_ignore_changes_array(node, bufnr)
-  local ft = vim.bo[bufnr].filetype
-  if ft ~= "hcl" and ft ~= "terraform" and ft ~= "tf" then
-    return {}
-  end
-
   local results = {}
-  -- This bracket query looks for attributes named "ignore_changes"
-  -- that contain a tuple of items
+
+  -- This is the bracket-based query for "ignore_changes" attributes
   local bracket_query = vim.treesitter.query.parse("hcl", [=[
     (attribute
       (identifier) @attr_name
@@ -125,10 +99,12 @@ local function parse_ignore_changes_array(node, bufnr)
     local attr_node = match[1]
     local attr_name = vim.treesitter.get_node_text(attr_node, bufnr)
     if attr_name == "ignore_changes" then
+      -- Starting from match[2] up to the end are the items
       for i = 2, #match do
         local item_node = match[i]
         local txt = vim.treesitter.get_node_text(item_node, bufnr)
-        txt = txt:gsub('^"(.*)"$', "%1") -- strip quotes
+        -- remove leading/trailing quotes if present
+        txt = txt:gsub('^"(.*)"$', "%1")
         table.insert(results, txt)
       end
     end
@@ -137,21 +113,10 @@ local function parse_ignore_changes_array(node, bufnr)
   return results
 end
 
--- ------------------------------------------------------------------------
--- 2) Parse block contents (properties, blocks, dynamic_blocks, etc.)
---   We only attempt this if filetype is hcl/terraform/tf
--- ------------------------------------------------------------------------
+-- ----------------------------------------------------------------------
+-- 2) parse_block_contents (already in your snippet)
+-- ----------------------------------------------------------------------
 local function parse_block_contents(node, bufnr)
-  local ft = vim.bo[bufnr].filetype
-  if ft ~= "hcl" and ft ~= "terraform" and ft ~= "tf" then
-    return {
-      properties = {},
-      blocks = {},
-      dynamic_blocks = {},
-      ignore_changes = {},
-    }
-  end
-
   local block_data = {
     properties = {},
     blocks = {},
@@ -159,7 +124,6 @@ local function parse_block_contents(node, bufnr)
     ignore_changes = {},
   }
 
-  -- Query for all attributes, store them as "properties"
   local attr_query = vim.treesitter.query.parse("hcl", [=[
     (attribute (identifier) @name)
   ]=])
@@ -170,7 +134,6 @@ local function parse_block_contents(node, bufnr)
     block_data.properties[name_txt] = true
   end
 
-  -- Query for block { ... } definitions
   local block_query = vim.treesitter.query.parse("hcl", [=[
     (block
       (identifier) @name
@@ -183,12 +146,12 @@ local function parse_block_contents(node, bufnr)
     local name_txt = vim.treesitter.get_node_text(name_node, bufnr)
 
     if name_txt == "dynamic" then
-      -- We'll handle dynamic blocks with a different query
+      -- skip below, or handle in dynamic section
       goto continue_block
     end
 
     if name_txt == "lifecycle" then
-      -- if there's an "ignore_changes" attribute in the lifecycle block
+      -- If there's an "ignore_changes" attribute in lifecycle, parse it:
       local lifecycle_data = parse_block_contents(body_node, bufnr)
       if lifecycle_data.properties["ignore_changes"] then
         local arr = parse_ignore_changes_array(body_node, bufnr)
@@ -202,7 +165,6 @@ local function parse_block_contents(node, bufnr)
     ::continue_block::
   end
 
-  -- Query for "dynamic" blocks
   local dynamic_query = vim.treesitter.query.parse("hcl", [=[
     (block
       (identifier) @dyn_kw
@@ -216,7 +178,6 @@ local function parse_block_contents(node, bufnr)
     local dyn_body_node = dmatch[3]
     local dyn_name_txt = vim.treesitter.get_node_text(dyn_name_node, bufnr):gsub('"', "")
 
-    -- inside a "dynamic" block, there can be a sub-block called "content"
     local content_query = vim.treesitter.query.parse("hcl", [=[
       (block
         (identifier) @content_kw
@@ -260,72 +221,9 @@ local function parse_block_contents(node, bufnr)
   return block_data
 end
 
--- ------------------------------------------------------------------------
--- 3) Parse the current buffer for resource blocks
---   We only do it if the current file is recognized as HCL/TF.
--- ------------------------------------------------------------------------
-function M.parse_current_buffer()
-  local bufnr = vim.api.nvim_get_current_buf()
-  local ft = vim.bo[bufnr].filetype
-
-  -- If not an HCL/TF file, bail out
-  if ft ~= "hcl" and ft ~= "terraform" and ft ~= "tf" then
-    write_output("Not an HCL/TF file. Skipping parse.")
-    return {}
-  end
-
-  if not ensure_hcl_parser() then
-    return {}
-  end
-
-  local parser = vim.treesitter.get_parser(bufnr, "hcl")
-  local tree = parser:parse()[1]
-  if not tree then
-    return {}
-  end
-
-  local root = tree:root()
-  local resources = {}
-
-  local resource_query = vim.treesitter.query.parse("hcl", [=[
-    (block
-      (identifier) @block_type
-      (string_lit) @resource_type
-      (string_lit) @resource_name
-      (body) @body)
-  ]=])
-
-  for _, captures, _ in resource_query:iter_matches(root, bufnr) do
-    local block_type_node = captures[1]
-    local resource_type_node = captures[2]
-    local body_node         = captures[4]
-
-    if not (block_type_node and resource_type_node and body_node) then
-      goto continue_res
-    end
-
-    local block_type_txt = vim.treesitter.get_node_text(block_type_node, bufnr)
-    if block_type_txt == "resource" then
-      local resource_type_txt = vim.treesitter.get_node_text(resource_type_node, bufnr):gsub('"', "")
-      local parsed_data = parse_block_contents(body_node, bufnr)
-      table.insert(resources, {
-        type = resource_type_txt,
-        properties = parsed_data.properties,
-        blocks = parsed_data.blocks,
-        dynamic_blocks = parsed_data.dynamic_blocks,
-        ignore_changes = parsed_data.ignore_changes,
-      })
-    end
-
-    ::continue_res::
-  end
-
-  return resources
-end
-
--- ------------------------------------------------------------------------
--- 4) Fetch the provider schema (terraform init + terraform providers schema)
--- ------------------------------------------------------------------------
+-- ----------------------------------------------------------------------
+-- 3) parse_current_buffer, fetch_schema, validate_resources, etc.
+-- ----------------------------------------------------------------------
 function M.fetch_schema(callback)
   write_output({}, true)
   local temp_dir = create_temp_dir()
@@ -353,9 +251,11 @@ function M.fetch_schema(callback)
     cwd = temp_dir,
     on_stdout = function(_, data)
       if data and #data > 0 then
-        write_output(vim.tbl_filter(function(line)
-          return line and line ~= ""
-        end, data))
+        write_output(
+          vim.tbl_filter(function(line)
+            return line and line ~= ""
+          end, data)
+        )
       end
     end,
     on_stderr = function(_, data)
@@ -415,11 +315,58 @@ function M.fetch_schema(callback)
   end
 end
 
--- ------------------------------------------------------------------------
--- 5) Validate the parsed data against the fetched provider schema
--- ------------------------------------------------------------------------
-local function validate_block_attributes(resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages)
-  -- inherited_ignores is a list of attribute/block names to skip
+function M.parse_current_buffer()
+  if not ensure_hcl_parser() then
+    return {}
+  end
+  local bufnr = vim.api.nvim_get_current_buf()
+  local parser = vim.treesitter.get_parser(bufnr, "hcl")
+  local tree = parser:parse()[1]
+  if not tree then
+    return {}
+  end
+
+  local root = tree:root()
+  local resources = {}
+
+  local resource_query = vim.treesitter.query.parse("hcl", [=[
+    (block
+      (identifier) @block_type
+      (string_lit) @resource_type
+      (string_lit) @resource_name
+      (body) @body)
+  ]=])
+
+  for _, captures, _ in resource_query:iter_matches(root, bufnr) do
+    local block_type_node = captures[1]
+    local resource_type_node = captures[2]
+    local body_node = captures[4]
+
+    if not (block_type_node and resource_type_node and body_node) then
+      goto continue_res
+    end
+
+    local block_type_txt = vim.treesitter.get_node_text(block_type_node, bufnr)
+    if block_type_txt == "resource" then
+      local resource_type_txt = vim.treesitter.get_node_text(resource_type_node, bufnr):gsub('"', "")
+      local parsed_data = parse_block_contents(body_node, bufnr)
+      table.insert(resources, {
+        type = resource_type_txt,
+        properties = parsed_data.properties,
+        blocks = parsed_data.blocks,
+        dynamic_blocks = parsed_data.dynamic_blocks,
+        ignore_changes = parsed_data.ignore_changes,
+      })
+    end
+    ::continue_res::
+  end
+
+  return resources
+end
+
+local function validate_block_attributes(
+  resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
+)
   inherited_ignores = inherited_ignores or {}
   local combined_ignores = vim.deepcopy(inherited_ignores)
   vim.list_extend(combined_ignores, block_data.ignore_changes or {})
@@ -429,8 +376,7 @@ local function validate_block_attributes(resource_type, block_schema, block_data
       if vim.tbl_contains(combined_ignores, attr_name) then
         goto continue_attr
       end
-
-      -- If the attribute is required but not found
+      -- If an attribute is "required" but not found in our resource data
       if not attr_info.computed and not block_data.properties[attr_name] then
         local msg = string.format(
           "%s missing %s property '%s' in path %s",
@@ -447,16 +393,18 @@ local function validate_block_attributes(resource_type, block_schema, block_data
 
   if block_schema.block_types then
     for block_name, btype_schema in pairs(block_schema.block_types) do
-      -- skip "timeouts" block, for example
+      -- For example, skip the "timeouts" block
       if block_name == "timeouts" then
         goto continue_block
       end
+
       if vim.tbl_contains(combined_ignores, block_name) then
         goto continue_block
       end
 
       local sub_block = block_data.blocks[block_name]
       local dyn_block = block_data.dynamic_blocks[block_name]
+
       if sub_block then
         validate_block_attributes(
           resource_type,
@@ -476,7 +424,8 @@ local function validate_block_attributes(resource_type, block_schema, block_data
           unique_messages
         )
       else
-        local is_required = (btype_schema.min_items and btype_schema.min_items > 0)
+        -- min_items > 0 => required
+        local is_required = btype_schema.min_items and btype_schema.min_items > 0
         local msg = string.format(
           "%s missing %s block '%s' in path %s",
           resource_type,
@@ -486,7 +435,6 @@ local function validate_block_attributes(resource_type, block_schema, block_data
         )
         unique_messages[msg] = true
       end
-
       ::continue_block::
     end
   end
@@ -495,7 +443,7 @@ end
 function M.validate_resources()
   write_output({}, true)
 
-  -- Fetch the Terraform schema and then validate the current buffer
+  -- Fetch the schema, then parse the buffer, then validate
   M.fetch_schema(function()
     local resources = M.parse_current_buffer()
     local used_provider_keys = {}
@@ -503,7 +451,8 @@ function M.validate_resources()
 
     for _, resource in ipairs(resources) do
       local matching_provider_block = nil
-      -- see if the resource type appears in any provider
+
+      -- Attempt to find a provider whose resource_schemas has resource.type
       for provider_key, provider_data in pairs(schema_cache) do
         local r_schemas = provider_data.resource_schemas
         if r_schemas and r_schemas[resource.type] then
@@ -516,6 +465,7 @@ function M.validate_resources()
       if not matching_provider_block then
         unique_messages["No provider schema found for resource: " .. resource.type] = true
       else
+        -- Validate the resource's properties and sub-blocks
         validate_block_attributes(
           resource.type,
           matching_provider_block,
@@ -527,7 +477,6 @@ function M.validate_resources()
       end
     end
 
-    -- Warn if there are declared providers not used by any resources
     for provider_key, _ in pairs(schema_cache) do
       if not used_provider_keys[provider_key] then
         unique_messages["Provider declared but not used by any resource: " .. provider_key] = true
@@ -543,9 +492,6 @@ function M.validate_resources()
   end)
 end
 
--- ------------------------------------------------------------------------
--- 6) Setup: define user command
--- ------------------------------------------------------------------------
 function M.setup()
   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 end
