@@ -275,6 +275,34 @@ local function parse_file(file_path)
   return {}
 end
 
+-- local function validate_block_attributes(
+--     resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
+-- )
+--   inherited_ignores = inherited_ignores or {}
+--   local combined_ignores = vim.deepcopy(inherited_ignores)
+--   vim.list_extend(combined_ignores, block_data.ignore_changes or {})
+--
+--   if block_schema.attributes then
+--     for attr_name, attr_info in pairs(block_schema.attributes) do
+--       if vim.tbl_contains(combined_ignores, attr_name) then
+--         goto continue_attr
+--       end
+--       -- If an attribute is "required" but not found in our resource data
+--       if not attr_info.computed and not block_data.properties[attr_name] then
+--       -- if not block_data.properties[attr_name] then --show computed properties as well
+--         local msg = string.format(
+--           "%s missing %s property '%s' in path %s",
+--           resource_type,
+--           attr_info.required and "required" or "optional",
+--           attr_name,
+--           block_path
+--         )
+--         unique_messages[msg] = true
+--       end
+--       ::continue_attr::
+--     end
+--   end
+
 local function validate_block_attributes(
     resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
 )
@@ -287,9 +315,8 @@ local function validate_block_attributes(
       if vim.tbl_contains(combined_ignores, attr_name) then
         goto continue_attr
       end
-      -- If an attribute is "required" but not found in our resource data
-      if not attr_info.computed and not block_data.properties[attr_name] then
-      -- if not block_data.properties[attr_name] then --show computed properties as well
+      -- Flag the attribute if it is not explicitly present in our resource data
+      if not block_data.properties[attr_name] then
         local msg = string.format(
           "%s missing %s property '%s' in path %s",
           resource_type,
@@ -298,6 +325,11 @@ local function validate_block_attributes(
           block_path
         )
         unique_messages[msg] = true
+
+        if attr_info.default ~= nil then
+          local default_msg = string.format("default value is %s", vim.inspect(attr_info.default))
+          unique_messages[default_msg] = true
+        end
       end
       ::continue_attr::
     end
