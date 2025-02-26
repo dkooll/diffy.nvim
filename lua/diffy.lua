@@ -288,7 +288,8 @@ local function validate_block_attributes(
         goto continue_attr
       end
       -- If an attribute is "required" but not found in our resource data
-      if not attr_info.computed and not block_data.properties[attr_name] then
+      -- if not attr_info.computed and not block_data.properties[attr_name] then // show computed as well
+      if not block_data.properties[attr_name] then
         local msg = string.format(
           "%s missing %s property '%s' in path %s",
           resource_type,
