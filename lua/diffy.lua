@@ -1,12 +1,12 @@
 local M = {}
 
--- Cache for provider schemas (for root)
+-- Cache for provider schemas (for root validation)
 local schema_cache = {}
 local output_bufnr = nil
 local output_winid = nil
 
 ------------------------------------------------------------
--- OUTPUT BUFFER & WINDOW
+-- OUTPUT BUFFER & WINDOW (unchanged)
 ------------------------------------------------------------
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
@@ -404,7 +404,7 @@ local function runTerraformInitAndSchema(dir, on_done)
     cleanup(temp_dir)
     return
   end
-  local init_job = vim.fn.jobstart({ "terraform", "init" }, {
+  local init_job = vim.fn.jobstart({ "terraform", "init", "-backend=false", "-input=false", "-no-color" }, {
     cwd = temp_dir,
     on_stdout = function(_, data)
       if data and #data > 0 then
@@ -428,7 +428,7 @@ local function runTerraformInitAndSchema(dir, on_done)
         cleanup(temp_dir)
         return
       end
-      vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
+      vim.fn.jobstart({ "terraform", "providers", "schema", "-json", "-no-color" }, {
         cwd = temp_dir,
         stdout_buffered = true,
         on_stdout = function(_, data)
@@ -531,16 +531,16 @@ local function validate_submodules(root_dir, merged_messages)
       local mainFile = modDir .. "/main.tf"
       local tfFile = modDir .. "/terraform.tf"
       if vim.fn.filereadable(mainFile) == 1 and vim.fn.filereadable(tfFile) == 1 then
-        table.insert(merged_messages, "\nValidating submodule: " .. modDir)
+        write_output({ "\nValidating submodule: " .. modDir })
         local subResources = parse_main_tf_in_dir(modDir)
         if #subResources == 0 then
-          table.insert(merged_messages, "No resources found in submodule: " .. modDir)
+          write_output("No resources found in submodule: " .. modDir)
         else
           runTerraformInitAndSchema(modDir, function(sub_schema)
             local localMsgs = {}
             do_schema_validation_for_resources(subResources, sub_schema, localMsgs)
             for _msg in pairs(localMsgs) do
-              table.insert(merged_messages, _msg .. " in submodule: " .. modDir)
+              write_output(_msg .. " in submodule: " .. modDir)
             end
           end)
         end
@@ -565,17 +565,10 @@ function M.validate_resources()
     end
     table.sort(messages)
     write_output(messages)
-    -- 2) Submodules validation
-    write_output({ "", "-- Checking submodules --" })
+    -- 2) Submodules validation (immediately output each submodule's findings)
+    write_output({ "\n-- Checking submodules --" })
     local root_dir = vim.fn.getcwd()
-    local subMessages = {}
-    validate_submodules(root_dir, subMessages)
-    if #subMessages == 0 then
-      write_output({ "", "No submodule findings." })
-    else
-      table.sort(subMessages)
-      write_output(subMessages)
-    end
+    validate_submodules(root_dir, {})
   end)
 end
 
