@@ -357,7 +357,7 @@ local function validate_terraform_files(module_path, module_schema)
   -- Validate main.tf in this module
   local main_tf = module_path .. "/main.tf"
   if vim.fn.filereadable(main_tf) == 1 then
-    write_output("Validating file: " .. main_tf)
+    -- Removed validation output message
 
     local resources = parse_file(main_tf)
     local file_messages = {}
@@ -407,7 +407,7 @@ local function validate_terraform_files(module_path, module_schema)
   -- Validate terraform.tf in this module
   local terraform_tf = module_path .. "/terraform.tf"
   if vim.fn.filereadable(terraform_tf) == 1 then
-    write_output("Validating file: " .. terraform_tf)
+    -- Removed validation output message
 
     -- Terraform.tf typically has provider blocks, not resources
     -- but we should check it for any resources that might be in there
@@ -464,6 +464,9 @@ local function validate_terraform_files(module_path, module_schema)
     end
     table.sort(message_list)
     write_output(message_list)
+
+    -- Add a clear indication the process is finished
+    write_output({ "", "Validation complete!" })
   end
 end
 
