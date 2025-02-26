@@ -253,11 +253,13 @@ local function parse_file(file_path)
           end
 
           local block_type_txt = vim.treesitter.get_node_text(block_type_node, bufnr)
-          if block_type_txt == "resource" then
+          -- Support both resources and data sources
+          if block_type_txt == "resource" or block_type_txt == "data" then
             local resource_type_txt = vim.treesitter.get_node_text(resource_type_node, bufnr):gsub('"', "")
             local parsed_data = parse_block_contents(body_node, bufnr)
             table.insert(resources, {
               type = resource_type_txt,
+              is_data = (block_type_txt == "data"),
               properties = parsed_data.properties,
               blocks = parsed_data.blocks,
               dynamic_blocks = parsed_data.dynamic_blocks,
@@ -353,126 +355,104 @@ end
 
 local function validate_terraform_files(module_path, module_schema)
   local module_messages = {}
+  local all_resources = {}
+  local used_providers = {}
 
-  -- Validate main.tf in this module
-  local main_tf = module_path .. "/main.tf"
-  if vim.fn.filereadable(main_tf) == 1 then
-    -- Removed validation output message
-
-    local resources = parse_file(main_tf)
-    local file_messages = {}
-    local used_providers = {}
-
-    for _, resource in ipairs(resources) do
-      local matching_provider_block = nil
-
-      -- Attempt to find a provider whose resource_schemas has resource.type
-      for provider_key, provider_data in pairs(module_schema) do
-        local schemas
-        if resource.is_data then
-          schemas = provider_data.data_source_schemas
-        else
-          schemas = provider_data.resource_schemas
+  -- Collect resources from all .tf files in the module directory
+  local handle = io.popen("find " .. module_path .. " -maxdepth 1 -name '*.tf' | sort")
+  if handle then
+    for file_path in handle:lines() do
+      -- Skip variables.tf files
+      if not file_path:match("/variables.tf$") then
+        local resources = parse_file(file_path)
+        for _, resource in ipairs(resources) do
+          table.insert(all_resources, resource)
         end
+      end
+    end
+    handle:close()
+  end
 
-        if schemas and schemas[resource.type] then
-          matching_provider_block = schemas[resource.type].block
-          used_providers[provider_key] = true
+  -- Process all collected resources
+  local file_messages = {}
+
+  for _, resource in ipairs(all_resources) do
+    local matching_provider_block = nil
+
+    -- Attempt to find a provider whose schema has resource.type
+    for provider_key, provider_data in pairs(module_schema) do
+      local schemas
+      if resource.is_data then
+        schemas = provider_data.data_source_schemas
+      else
+        schemas = provider_data.resource_schemas
+      end
+
+      if schemas and schemas[resource.type] then
+        matching_provider_block = schemas[resource.type].block
+        used_providers[provider_key] = true
+        break
+      end
+    end
+
+    if not matching_provider_block then
+      -- Try to match by prefix
+      local resource_prefix = resource.type:match("^([^_]+)_")
+      if resource_prefix then
+        for provider_key, _ in pairs(module_schema) do
+          -- Extract provider name (e.g., "azurerm" from "registry.terraform.io/hashicorp/azurerm")
+          local provider_name = provider_key:match("registry.terraform.io/hashicorp/(.+)") or
+                               provider_key:match("registry.terraform.io/(.+)") or
+                               provider_key
+
+          if provider_name == resource_prefix then
+            used_providers[provider_key] = true
+            break
+          end
+        end
+      end
+
+      file_messages["No provider schema found for " .. (resource.is_data and "data source" or "resource") .. ": " .. resource.type] = true
+    else
+      -- Validate the resource's properties and sub-blocks
+      validate_block_attributes(
+        resource.type,
+        matching_provider_block,
+        resource,
+        "root",
+        resource.ignore_changes,
+        file_messages
+      )
+    end
+  end
+
+  -- Check for unused providers
+  for provider_key, _ in pairs(module_schema) do
+    if not used_providers[provider_key] then
+      -- Before reporting as unused, extract the provider short name
+      local provider_name = provider_key:match("registry.terraform.io/hashicorp/(.+)") or
+                           provider_key:match("registry.terraform.io/(.+)") or
+                           provider_key
+
+      local used = false
+      -- Check if any resource uses this provider by prefix
+      for _, resource in ipairs(all_resources) do
+        local resource_prefix = resource.type:match("^([^_]+)_")
+        if resource_prefix and resource_prefix == provider_name then
+          used = true
           break
         end
       end
 
-      if not matching_provider_block then
-        file_messages["No provider schema found for resource: " .. resource.type] = true
-      else
-        -- Validate the resource's properties and sub-blocks
-        validate_block_attributes(
-          resource.type,
-          matching_provider_block,
-          resource,
-          "root",
-          resource.ignore_changes,
-          file_messages
-        )
+      if not used then
+        file_messages["Provider declared but not used by any resource: " .. provider_key] = true
       end
-    end
-
-    -- Check for unused providers
-    for provider_key, _ in pairs(module_schema) do
-      if not used_providers[provider_key] then
-        -- Before reporting as unused, check if it might be used by data sources with a different prefix
-        local provider_name = provider_key:match("registry.terraform.io/hashicorp/(.+)") or provider_key
-        local used = false
-
-        -- Look through resources for any that might use this provider
-        for _, resource in ipairs(resources) do
-          local resource_prefix = resource.type:match("^([^_]+)_")
-          if resource_prefix and resource_prefix == provider_name then
-            used = true
-            break
-          end
-        end
-
-        if not used then
-          file_messages["Provider declared but not used by any resource: " .. provider_key] = true
-        end
-      end
-    end
-
-    -- Add file messages to module messages
-    for msg, _ in pairs(file_messages) do
-      module_messages[msg] = true
     end
   end
 
-  -- Validate terraform.tf in this module
-  local terraform_tf = module_path .. "/terraform.tf"
-  if vim.fn.filereadable(terraform_tf) == 1 then
-    -- Removed validation output message
-
-    -- Terraform.tf typically has provider blocks, not resources
-    -- but we should check it for any resources that might be in there
-    local resources = parse_file(terraform_tf)
-
-    if #resources > 0 then
-      local file_messages = {}
-
-      for _, resource in ipairs(resources) do
-        local matching_provider_block = nil
-
-        for _, provider_data in pairs(module_schema) do
-          local schemas
-          if resource.is_data then
-            schemas = provider_data.data_source_schemas
-          else
-            schemas = provider_data.resource_schemas
-          end
-
-          if schemas and schemas[resource.type] then
-            matching_provider_block = schemas[resource.type].block
-            break
-          end
-        end
-
-        if not matching_provider_block then
-          file_messages["No provider schema found for resource: " .. resource.type] = true
-        else
-          validate_block_attributes(
-            resource.type,
-            matching_provider_block,
-            resource,
-            "root",
-            resource.ignore_changes,
-            file_messages
-          )
-        end
-      end
-
-      -- Add file messages to module messages
-      for msg, _ in pairs(file_messages) do
-        module_messages[msg] = true
-      end
-    end
+  -- Add file messages to module messages
+  for msg, _ in pairs(file_messages) do
+    module_messages[msg] = true
   end
 
   -- Add module name prefix to all messages and add to global messages
@@ -617,6 +597,7 @@ function M.setup()
 end
 
 return M
+
 -- local M = {}
 --
 -- -- Global variables for output and tracking
