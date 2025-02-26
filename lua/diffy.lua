@@ -1,10 +1,10 @@
 local M = {}
 
--- Cache for provider schemas
-local schema_cache = {}
+-- Global variables for output and tracking
 local output_bufnr = nil
 local output_winid = nil
-local current_module_path = nil
+local pending_modules = 0
+local global_messages = {}
 
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
@@ -84,7 +84,7 @@ local function parse_ignore_changes_array(node, bufnr)
   local results = {}
 
   -- This is the bracket-based query for "ignore_changes" attributes
-  local bracket_query = vim.treesitter.query.parse("hcl", [=[
+  local bracket_query = vim.treesitter.query.parse("hcl", [[
     (attribute
       (identifier) @attr_name
       (expression
@@ -92,7 +92,7 @@ local function parse_ignore_changes_array(node, bufnr)
           (tuple
             ((expression) @item)+)))
     )
-  ]=])
+  ]])
 
   for _, match, _ in bracket_query:iter_matches(node, bufnr) do
     local attr_node = match[1]
@@ -120,9 +120,9 @@ local function parse_block_contents(node, bufnr)
     ignore_changes = {},
   }
 
-  local attr_query = vim.treesitter.query.parse("hcl", [=[
+  local attr_query = vim.treesitter.query.parse("hcl", [[
     (attribute (identifier) @name)
-  ]=])
+  ]])
 
   for _, match, _ in attr_query:iter_matches(node, bufnr) do
     local name_node = match[1]
@@ -130,11 +130,11 @@ local function parse_block_contents(node, bufnr)
     block_data.properties[name_txt] = true
   end
 
-  local block_query = vim.treesitter.query.parse("hcl", [=[
+  local block_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @name
       (body) @body)
-  ]=])
+  ]])
 
   for _, bmatch, _ in block_query:iter_matches(node, bufnr) do
     local name_node = bmatch[1]
@@ -161,25 +161,25 @@ local function parse_block_contents(node, bufnr)
     ::continue_block::
   end
 
-  local dynamic_query = vim.treesitter.query.parse("hcl", [=[
+  local dynamic_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @dyn_kw
       (string_lit) @dyn_name
       (body) @dyn_body
       (#eq? @dyn_kw "dynamic"))
-  ]=])
+  ]])
 
   for _, dmatch, _ in dynamic_query:iter_matches(node, bufnr) do
     local dyn_name_node = dmatch[2]
     local dyn_body_node = dmatch[3]
     local dyn_name_txt = vim.treesitter.get_node_text(dyn_name_node, bufnr):gsub('"', "")
 
-    local content_query = vim.treesitter.query.parse("hcl", [=[
+    local content_query = vim.treesitter.query.parse("hcl", [[
       (block
         (identifier) @content_kw
         (body) @content_body
         (#eq? @content_kw "content"))
-    ]=])
+    ]])
 
     local found_content = false
     for _, cmatch, _ in content_query:iter_matches(dyn_body_node, bufnr) do
@@ -217,129 +217,62 @@ local function parse_block_contents(node, bufnr)
   return block_data
 end
 
-function M.fetch_schema(callback, module_path)
-  current_module_path = module_path or "."
-
-  write_output("Fetching schema for module: " .. current_module_path)
-
-  -- Run terraform init and providers schema directly in the module directory
-  -- No need to create a temp directory or copy files
-  local init_job = vim.fn.jobstart({ "terraform", "init" }, {
-    cwd = current_module_path,
-    on_stdout = function(_, data)
-      if data and #data > 0 then
-        write_output(
-          vim.tbl_filter(function(line)
-            return line and line ~= ""
-          end, data)
-        )
-      end
-    end,
-    on_stderr = function(_, data)
-      if data and #data > 0 then
-        write_output(vim.tbl_map(function(line)
-          return "Error: " .. line
-        end, vim.tbl_filter(function(line)
-          return line and line ~= ""
-        end, data)))
-      end
-    end,
-    on_exit = function(_, exit_code)
-      if exit_code ~= 0 then
-        write_output("Failed to initialize Terraform in " .. current_module_path)
-        return
-      end
-
-      vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
-        cwd = current_module_path,
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-          if data and #data > 0 then
-            local json_str = table.concat(data, "\n")
-            local success, decoded = pcall(vim.json.decode, json_str)
-            if success and decoded and decoded.provider_schemas then
-              schema_cache = decoded.provider_schemas
-              if callback then
-                write_output({ "" })
-                callback()
-              end
-            else
-              write_output("Failed to parse schema JSON")
-            end
-          end
-        end,
-        on_stderr = function(_, data)
-          if data and #data > 0 then
-            write_output(vim.tbl_filter(function(line)
-              return line and line ~= ""
-            end, data))
-          end
-        end,
-        on_exit = function(_, schema_exit_code)
-          if schema_exit_code ~= 0 then
-            write_output("Failed to fetch schema")
-          end
-        end
-      })
-    end
-  })
-
-  if init_job == 0 then
-    write_output("Failed to start Terraform initialization")
-  end
-end
-
-function M.parse_file(file_path)
+local function parse_file(file_path)
   if not ensure_hcl_parser() then
     return {}
   end
 
+  -- Use bufadd/bufload to get the file content into a buffer
   local bufnr = vim.fn.bufadd(file_path)
-  vim.fn.bufload(bufnr)
-  vim.api.nvim_buf_set_option(bufnr, 'filetype', 'terraform')
+  if bufnr and bufnr > 0 then
+    vim.fn.bufload(bufnr)
+    vim.api.nvim_buf_set_option(bufnr, 'filetype', 'terraform')
 
-  local parser = vim.treesitter.get_parser(bufnr, "hcl")
-  local tree = parser:parse()[1]
-  if not tree then
-    return {}
+    local parser = vim.treesitter.get_parser(bufnr, "hcl")
+    if parser then
+      local tree = parser:parse()[1]
+      if tree then
+        local root = tree:root()
+        local resources = {}
+
+        local resource_query = vim.treesitter.query.parse("hcl", [[
+          (block
+            (identifier) @block_type
+            (string_lit) @resource_type
+            (string_lit) @resource_name
+            (body) @body)
+        ]])
+
+        for _, captures, _ in resource_query:iter_matches(root, bufnr) do
+          local block_type_node = captures[1]
+          local resource_type_node = captures[2]
+          local body_node = captures[4]
+
+          if not (block_type_node and resource_type_node and body_node) then
+            goto continue_res
+          end
+
+          local block_type_txt = vim.treesitter.get_node_text(block_type_node, bufnr)
+          if block_type_txt == "resource" then
+            local resource_type_txt = vim.treesitter.get_node_text(resource_type_node, bufnr):gsub('"', "")
+            local parsed_data = parse_block_contents(body_node, bufnr)
+            table.insert(resources, {
+              type = resource_type_txt,
+              properties = parsed_data.properties,
+              blocks = parsed_data.blocks,
+              dynamic_blocks = parsed_data.dynamic_blocks,
+              ignore_changes = parsed_data.ignore_changes,
+            })
+          end
+          ::continue_res::
+        end
+
+        return resources
+      end
+    end
   end
 
-  local root = tree:root()
-  local resources = {}
-
-  local resource_query = vim.treesitter.query.parse("hcl", [=[
-    (block
-      (identifier) @block_type
-      (string_lit) @resource_type
-      (string_lit) @resource_name
-      (body) @body)
-  ]=])
-
-  for _, captures, _ in resource_query:iter_matches(root, bufnr) do
-    local block_type_node = captures[1]
-    local resource_type_node = captures[2]
-    local body_node = captures[4]
-
-    if not (block_type_node and resource_type_node and body_node) then
-      goto continue_res
-    end
-
-    local block_type_txt = vim.treesitter.get_node_text(block_type_node, bufnr)
-    if block_type_txt == "resource" then
-      local resource_type_txt = vim.treesitter.get_node_text(resource_type_node, bufnr):gsub('"', "")
-      local parsed_data = parse_block_contents(body_node, bufnr)
-      table.insert(resources, {
-        type = resource_type_txt,
-        properties = parsed_data.properties,
-        blocks = parsed_data.blocks,
-        dynamic_blocks = parsed_data.dynamic_blocks,
-        ignore_changes = parsed_data.ignore_changes,
-      })
-    end
-    ::continue_res::
-  end
-
-  return resources
+  return {}
 end
 
 local function validate_block_attributes(
@@ -418,38 +351,33 @@ local function validate_block_attributes(
   end
 end
 
-local function validate_file(file_path, module_path, global_messages)
-  -- Skip variables.tf files as requested
-  if file_path:match("variables%.tf$") then
-    return
-  end
+local function validate_terraform_files(module_path, module_schema)
+  local module_messages = {}
 
-  -- Save current buffer number
-  local orig_bufnr = vim.api.nvim_get_current_buf()
+  -- Validate main.tf in this module
+  local main_tf = module_path .. "/main.tf"
+  if vim.fn.filereadable(main_tf) == 1 then
+    write_output("Validating file: " .. main_tf)
 
-  -- Load the file if it's not already open
-  if vim.fn.filereadable(file_path) == 1 then
-    write_output("Validating file: " .. file_path)
-
-    local resources = M.parse_file(file_path)
-    local used_provider_keys = {}
-    local unique_messages = {}
+    local resources = parse_file(main_tf)
+    local file_messages = {}
+    local used_providers = {}
 
     for _, resource in ipairs(resources) do
       local matching_provider_block = nil
 
       -- Attempt to find a provider whose resource_schemas has resource.type
-      for provider_key, provider_data in pairs(schema_cache) do
+      for provider_key, provider_data in pairs(module_schema) do
         local r_schemas = provider_data.resource_schemas
         if r_schemas and r_schemas[resource.type] then
           matching_provider_block = r_schemas[resource.type].block
-          used_provider_keys[provider_key] = true
+          used_providers[provider_key] = true
           break
         end
       end
 
       if not matching_provider_block then
-        unique_messages["No provider schema found for resource: " .. resource.type] = true
+        file_messages["No provider schema found for resource: " .. resource.type] = true
       else
         -- Validate the resource's properties and sub-blocks
         validate_block_attributes(
@@ -458,34 +386,174 @@ local function validate_file(file_path, module_path, global_messages)
           resource,
           "root",
           resource.ignore_changes,
-          unique_messages
+          file_messages
         )
       end
     end
 
-    for provider_key, _ in pairs(schema_cache) do
-      if not used_provider_keys[provider_key] then
-        unique_messages["Provider declared but not used by any resource: " .. provider_key] = true
+    -- Check for unused providers
+    for provider_key, _ in pairs(module_schema) do
+      if not used_providers[provider_key] then
+        file_messages["Provider declared but not used by any resource: " .. provider_key] = true
       end
     end
 
-    -- Add module name prefix to all messages
-    for msg in pairs(unique_messages) do
-      global_messages[module_path .. ": " .. msg] = true
+    -- Add file messages to module messages
+    for msg, _ in pairs(file_messages) do
+      module_messages[msg] = true
     end
+  end
 
-    -- Restore original buffer
-    vim.api.nvim_set_current_buf(orig_bufnr)
-  else
-    write_output("Could not find file: " .. file_path)
+  -- Validate terraform.tf in this module
+  local terraform_tf = module_path .. "/terraform.tf"
+  if vim.fn.filereadable(terraform_tf) == 1 then
+    write_output("Validating file: " .. terraform_tf)
+
+    -- Terraform.tf typically has provider blocks, not resources
+    -- but we should check it for any resources that might be in there
+    local resources = parse_file(terraform_tf)
+
+    if #resources > 0 then
+      local file_messages = {}
+
+      for _, resource in ipairs(resources) do
+        local matching_provider_block = nil
+
+        for _, provider_data in pairs(module_schema) do
+          local r_schemas = provider_data.resource_schemas
+          if r_schemas and r_schemas[resource.type] then
+            matching_provider_block = r_schemas[resource.type].block
+            break
+          end
+        end
+
+        if not matching_provider_block then
+          file_messages["No provider schema found for resource: " .. resource.type] = true
+        else
+          validate_block_attributes(
+            resource.type,
+            matching_provider_block,
+            resource,
+            "root",
+            resource.ignore_changes,
+            file_messages
+          )
+        end
+      end
+
+      -- Add file messages to module messages
+      for msg, _ in pairs(file_messages) do
+        module_messages[msg] = true
+      end
+    end
+  end
+
+  -- Add module name prefix to all messages and add to global messages
+  for msg, _ in pairs(module_messages) do
+    global_messages[module_path .. ": " .. msg] = true
+  end
+
+  -- Decrement the pending modules counter
+  pending_modules = pending_modules - 1
+
+  -- If this was the last module to process, display the results
+  if pending_modules == 0 then
+    local message_list = {}
+    for msg, _ in pairs(global_messages) do
+      table.insert(message_list, msg)
+    end
+    table.sort(message_list)
+    write_output(message_list)
+  end
+end
+
+-- Function to process a single module
+local function process_module(module_path)
+  write_output("Fetching schema for module: " .. module_path)
+
+  -- Use the module's own terraform.tf file directly
+  local tf_file = module_path .. "/terraform.tf"
+
+  -- Check if terraform.tf exists
+  if vim.fn.filereadable(tf_file) ~= 1 then
+    write_output("Could not find terraform.tf in " .. module_path)
+    pending_modules = pending_modules - 1
+    return
+  end
+
+  -- Run terraform init directly in the module directory
+  local init_job = vim.fn.jobstart({ "terraform", "init" }, {
+    cwd = module_path,
+    on_stdout = function(_, data)
+      if data and #data > 0 then
+        write_output(
+          vim.tbl_filter(function(line)
+            return line and line ~= ""
+          end, data)
+        )
+      end
+    end,
+    on_stderr = function(_, data)
+      if data and #data > 0 then
+        write_output(vim.tbl_map(function(line)
+          return "Error: " .. line
+        end, vim.tbl_filter(function(line)
+          return line and line ~= ""
+        end, data)))
+      end
+    end,
+    on_exit = function(_, exit_code)
+      if exit_code ~= 0 then
+        write_output("Failed to initialize Terraform in " .. module_path)
+        pending_modules = pending_modules - 1
+        return
+      end
+
+      -- Get schema for this module
+      vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
+        cwd = module_path,
+        stdout_buffered = true,
+        on_stdout = function(_, data)
+          if data and #data > 0 then
+            local json_str = table.concat(data, "\n")
+            local success, decoded = pcall(vim.json.decode, json_str)
+            if success and decoded and decoded.provider_schemas then
+              -- Now validate the module files using this schema
+              validate_terraform_files(module_path, decoded.provider_schemas)
+            else
+              write_output("Failed to parse schema JSON for " .. module_path)
+              pending_modules = pending_modules - 1
+            end
+          end
+        end,
+        on_stderr = function(_, data)
+          if data and #data > 0 then
+            write_output(vim.tbl_filter(function(line)
+              return line and line ~= ""
+            end, data))
+          end
+        end,
+        on_exit = function(_, schema_exit_code)
+          if schema_exit_code ~= 0 then
+            write_output("Failed to fetch schema for " .. module_path)
+            pending_modules = pending_modules - 1
+          end
+        end
+      })
+    end
+  })
+
+  if init_job == 0 then
+    write_output("Failed to start Terraform initialization for " .. module_path)
+    pending_modules = pending_modules - 1
   end
 end
 
 function M.validate_resources()
   write_output({}, true)
+  global_messages = {}
 
   local modules = discover_modules()
-  local global_messages = {}
 
   if #modules == 0 then
     write_output("No Terraform modules found containing terraform.tf")
@@ -494,32 +562,12 @@ function M.validate_resources()
 
   write_output("Found " .. #modules .. " module(s)")
 
-  -- Process each module
+  -- Set the pending modules counter to track when all modules are done
+  pending_modules = #modules
+
+  -- Process each module in parallel
   for _, module_path in ipairs(modules) do
-    -- Fetch schema for this module
-    M.fetch_schema(function()
-      -- Validate main.tf in this module
-      local main_tf = module_path .. "/main.tf"
-      if vim.fn.filereadable(main_tf) == 1 then
-        validate_file(main_tf, module_path, global_messages)
-      end
-
-      -- Look for terraform.tf in this module
-      local terraform_tf = module_path .. "/terraform.tf"
-      if vim.fn.filereadable(terraform_tf) == 1 then
-        validate_file(terraform_tf, module_path, global_messages)
-      end
-
-      -- Display a summary of all messages at the end
-      if module_path == modules[#modules] then -- If this is the last module
-        local messages = {}
-        for msg in pairs(global_messages) do
-          table.insert(messages, msg)
-        end
-        table.sort(messages)
-        write_output(messages)
-      end
-    end, module_path)
+    process_module(module_path)
   end
 end
 
