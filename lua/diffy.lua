@@ -400,7 +400,22 @@ local function validate_terraform_files(module_path, module_schema)
     -- Check for unused providers
     for provider_key, _ in pairs(module_schema) do
       if not used_providers[provider_key] then
-        file_messages["Provider declared but not used by any resource: " .. provider_key] = true
+        -- Before reporting as unused, check if it might be used by data sources with a different prefix
+        local provider_name = provider_key:match("registry.terraform.io/hashicorp/(.+)") or provider_key
+        local used = false
+
+        -- Look through resources for any that might use this provider
+        for _, resource in ipairs(resources) do
+          local resource_prefix = resource.type:match("^([^_]+)_")
+          if resource_prefix and resource_prefix == provider_name then
+            used = true
+            break
+          end
+        end
+
+        if not used then
+          file_messages["Provider declared but not used by any resource: " .. provider_key] = true
+        end
       end
     end
 
@@ -602,7 +617,6 @@ function M.setup()
 end
 
 return M
-
 -- local M = {}
 --
 -- -- Global variables for output and tracking
