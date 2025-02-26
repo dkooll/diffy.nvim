@@ -5,6 +5,9 @@ local schema_cache = {}
 local output_bufnr = nil
 local output_winid = nil
 
+------------------------------------------------------------
+-- OUTPUT BUFFER & WINDOW
+------------------------------------------------------------
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
     output_bufnr = vim.api.nvim_create_buf(false, true)
@@ -48,6 +51,9 @@ local function write_output(lines, clear)
   vim.cmd("redraw")
 end
 
+------------------------------------------------------------
+-- TEMP DIR & CLEANUP
+------------------------------------------------------------
 local function create_temp_dir()
   local handle = io.popen("mktemp -d")
   if handle then
@@ -69,6 +75,9 @@ local function cleanup(temp_dir)
   end
 end
 
+------------------------------------------------------------
+-- TREESITTER SUPPORT
+------------------------------------------------------------
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
@@ -85,8 +94,7 @@ local function parse_ignore_changes_array(node, bufnr)
       (identifier) @attr_name
       (expression
         (collection_value
-          (tuple
-            ((expression) @item)+)))
+          (tuple ((expression) @item)+)))
     )
   ]=])
   for _, match, _ in bracket_query:iter_matches(node, bufnr) do
@@ -120,9 +128,7 @@ local function parse_block_contents(node, bufnr)
     block_data.properties[name_txt] = true
   end
   local block_query = vim.treesitter.query.parse("hcl", [=[
-    (block
-      (identifier) @name
-      (body) @body)
+    (block (identifier) @name (body) @body)
   ]=])
   for _, bmatch, _ in block_query:iter_matches(node, bufnr) do
     local name_node = bmatch[1]
@@ -141,21 +147,14 @@ local function parse_block_contents(node, bufnr)
     end
   end
   local dynamic_query = vim.treesitter.query.parse("hcl", [=[
-    (block
-      (identifier) @dyn_kw
-      (string_lit) @dyn_name
-      (body) @dyn_body
-      (#eq? @dyn_kw "dynamic"))
+    (block (identifier) @dyn_kw (string_lit) @dyn_name (body) @dyn_body (#eq? @dyn_kw "dynamic"))
   ]=])
   for _, dmatch, _ in dynamic_query:iter_matches(node, bufnr) do
     local dyn_name_node = dmatch[2]
     local dyn_body_node = dmatch[3]
     local dyn_name_txt = vim.treesitter.get_node_text(dyn_name_node, bufnr):gsub('"', "")
     local content_query = vim.treesitter.query.parse("hcl", [=[
-      (block
-        (identifier) @content_kw
-        (body) @content_body
-        (#eq? @content_kw "content"))
+      (block (identifier) @content_kw (body) @content_body (#eq? @content_kw "content"))
     ]=])
     local found_content = false
     for _, cmatch, _ in content_query:iter_matches(dyn_body_node, bufnr) do
@@ -188,6 +187,9 @@ local function parse_block_contents(node, bufnr)
   return block_data
 end
 
+------------------------------------------------------------
+-- SCHEMA FETCH FOR ROOT (unchanged)
+------------------------------------------------------------
 function M.fetch_schema(callback)
   write_output({}, true)
   local temp_dir = create_temp_dir()
@@ -272,6 +274,9 @@ function M.fetch_schema(callback)
   end
 end
 
+------------------------------------------------------------
+-- PARSE CURRENT BUFFER (ROOT) using Treesitter (unchanged)
+------------------------------------------------------------
 function M.parse_current_buffer()
   if not ensure_hcl_parser() then
     return {}
@@ -285,11 +290,7 @@ function M.parse_current_buffer()
   local root = tree:root()
   local resources = {}
   local resource_query = vim.treesitter.query.parse("hcl", [=[
-    (block
-      (identifier) @block_type
-      (string_lit) @resource_type
-      (string_lit) @resource_name
-      (body) @body)
+    (block (identifier) @block_type (string_lit) @resource_type (string_lit) @resource_name (body) @body)
   ]=])
   for _, captures, _ in resource_query:iter_matches(root, bufnr) do
     local block_type_node = captures[1]
@@ -315,10 +316,14 @@ function M.parse_current_buffer()
   return resources
 end
 
+------------------------------------------------------------
+-- VALIDATION LOGIC: Validate Block Attributes (unchanged, refactored inline)
+------------------------------------------------------------
 local function validate_block_attributes(resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages)
   inherited_ignores = inherited_ignores or {}
   local combined_ignores = vim.deepcopy(inherited_ignores)
   vim.list_extend(combined_ignores, block_data.ignore_changes or {})
+
   if block_schema.attributes then
     for attr_name, attr_info in pairs(block_schema.attributes) do
       if not vim.tbl_contains(combined_ignores, attr_name) then
@@ -332,6 +337,7 @@ local function validate_block_attributes(resource_type, block_schema, block_data
       end
     end
   end
+
   if block_schema.block_types then
     for block_name, btype_schema in pairs(block_schema.block_types) do
       if block_name ~= "timeouts" and not vim.tbl_contains(combined_ignores, block_name) then
@@ -355,6 +361,9 @@ local function validate_block_attributes(resource_type, block_schema, block_data
   end
 end
 
+------------------------------------------------------------
+-- VALIDATION LOGIC: Validate Resources Against Schema (unchanged)
+------------------------------------------------------------
 local function do_schema_validation_for_resources(resources, schema_map, unique_messages)
   for _, resource in ipairs(resources) do
     local matching_block = nil
@@ -474,11 +483,7 @@ local function parse_main_tf_in_dir(dir)
   local root = tree:root()
   local resources = {}
   local resource_query = vim.treesitter.query.parse("hcl", [=[
-    (block
-      (identifier) @block_type
-      (string_lit) @resource_type
-      (string_lit) @resource_name
-      (body) @body)
+    (block (identifier) @block_type (string_lit) @resource_type (string_lit) @resource_name (body) @body)
   ]=])
   for _, captures, _ in resource_query:iter_matches(root, 0) do
     local block_type_node = captures[1]
@@ -505,7 +510,7 @@ local function parse_main_tf_in_dir(dir)
 end
 
 ------------------------------------------------------------
--- SUBMODULE VALIDATION: Apply the same logic for every folder under "modules"
+-- SUBMODULE VALIDATION: For every folder under "modules", run the same logic
 ------------------------------------------------------------
 local function validate_submodules(root_dir, merged_messages)
   local uv = vim.loop
