@@ -2,7 +2,7 @@
 
 A neovim plugin for validating terraform hcl resources against provider schemas.
 
-It analyzes your terraform configurations and helps identify missing required properties and blocks, including nested dynamic ones.
+It analyzes your terraform configurations and submodules, helping identify missing required properties and blocks across your entire project, including nested dynamic ones and cross-module dependencies.
 
 ## Usage
 
