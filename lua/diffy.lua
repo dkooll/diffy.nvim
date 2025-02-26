@@ -188,9 +188,6 @@ local function parse_block_contents(node, bufnr)
   return block_data
 end
 
-------------------------------------------------------------
--- SCHEMA FETCH FOR ROOT (unchanged)
-------------------------------------------------------------
 function M.fetch_schema(callback)
   write_output({}, true)
   local temp_dir = create_temp_dir()
@@ -318,50 +315,40 @@ function M.parse_current_buffer()
   return resources
 end
 
-local function validate_block_attributes(resource_type, block_schema, block_data, block_path, inherited_ignores,
-                                         unique_messages)
+local function validate_block_attributes(resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages)
   inherited_ignores = inherited_ignores or {}
   local combined_ignores = vim.deepcopy(inherited_ignores)
   vim.list_extend(combined_ignores, block_data.ignore_changes or {})
-
   if block_schema.attributes then
     for attr_name, attr_info in pairs(block_schema.attributes) do
       if not vim.tbl_contains(combined_ignores, attr_name) then
-        if not attr_info.computed and not block_data.properties[attr_name] then
-          local msg = string.format(
-            "%s missing %s property '%s' in path %s",
-            resource_type,
-            attr_info.required and "required" or "optional",
-            attr_name,
-            block_path
-          )
-          unique_messages[msg] = true
-        end
+        unique_messages[string.format(
+          "%s missing %s property '%s' in path %s",
+          resource_type,
+          attr_info.required and "required" or "optional",
+          attr_name,
+          block_path
+        )] = true
       end
     end
   end
-
   if block_schema.block_types then
     for block_name, btype_schema in pairs(block_schema.block_types) do
       if block_name ~= "timeouts" and not vim.tbl_contains(combined_ignores, block_name) then
         local sub_block = block_data.blocks[block_name]
         local dyn_block = block_data.dynamic_blocks[block_name]
         if sub_block then
-          validate_block_attributes(resource_type, btype_schema.block, sub_block, block_path .. "." .. block_name,
-            combined_ignores, unique_messages)
+          validate_block_attributes(resource_type, btype_schema.block, sub_block, block_path .. "." .. block_name, combined_ignores, unique_messages)
         elseif dyn_block then
-          validate_block_attributes(resource_type, btype_schema.block, dyn_block, block_path .. ".dynamic." .. block_name,
-            combined_ignores, unique_messages)
+          validate_block_attributes(resource_type, btype_schema.block, dyn_block, block_path .. ".dynamic." .. block_name, combined_ignores, unique_messages)
         else
-          local is_required = btype_schema.min_items and btype_schema.min_items > 0
-          local msg = string.format(
+          unique_messages[string.format(
             "%s missing %s block '%s' in path %s",
             resource_type,
-            is_required and "required" or "optional",
+            (btype_schema.min_items and btype_schema.min_items > 0) and "required" or "optional",
             block_name,
             block_path
-          )
-          unique_messages[msg] = true
+          )] = true
         end
       end
     end
@@ -386,6 +373,9 @@ local function do_schema_validation_for_resources(resources, schema_map, unique_
   end
 end
 
+------------------------------------------------------------
+-- REUSABLE FUNCTION: Run Terraform Init & Fetch Schema for a given directory
+------------------------------------------------------------
 local function runTerraformInitAndSchema(dir, on_done)
   write_output({}, true)
   local temp_dir = create_temp_dir()
@@ -465,6 +455,9 @@ local function runTerraformInitAndSchema(dir, on_done)
   end
 end
 
+------------------------------------------------------------
+-- PARSE A SUBMODULE'S main.tf FROM DISK
+------------------------------------------------------------
 local function parse_main_tf_in_dir(dir)
   local main_file = dir .. "/main.tf"
   local fd = io.open(main_file, "r")
@@ -511,6 +504,9 @@ local function parse_main_tf_in_dir(dir)
   return resources
 end
 
+------------------------------------------------------------
+-- SUBMODULE VALIDATION: Apply the same logic for every folder under "modules"
+------------------------------------------------------------
 local function validate_submodules(root_dir, merged_messages)
   local uv = vim.loop
   ---@diagnostic disable: undefined-field
@@ -520,7 +516,6 @@ local function validate_submodules(root_dir, merged_messages)
     table.insert(merged_messages, "No modules folder found or cannot scan directory: " .. root_dir .. "/modules")
     return
   end
-
   while true do
     ---@diagnostic disable: undefined-field
     local name, t = uv.fs_scandir_next(handle)
@@ -549,9 +544,12 @@ local function validate_submodules(root_dir, merged_messages)
   end
 end
 
+------------------------------------------------------------
+-- VALIDATE RESOURCES: Validate Root and then Submodules (independently)
+------------------------------------------------------------
 function M.validate_resources()
   write_output({}, true)
-
+  -- 1) Root validation
   M.fetch_schema(function()
     local resources = M.parse_current_buffer()
     local unique_messages = {}
@@ -562,7 +560,7 @@ function M.validate_resources()
     end
     table.sort(messages)
     write_output(messages)
-
+    -- 2) Submodules validation
     write_output({ "", "-- Checking submodules --" })
     local root_dir = vim.fn.getcwd()
     local subMessages = {}
@@ -576,11 +574,15 @@ function M.validate_resources()
   end)
 end
 
+------------------------------------------------------------
+-- SETUP COMMAND
+------------------------------------------------------------
 function M.setup()
   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 end
 
 return M
+
 
 -- local M = {}
 --
