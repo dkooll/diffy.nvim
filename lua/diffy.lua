@@ -289,9 +289,9 @@ local function validate_block_attributes(
       end
 
       -- Skip 'id' property as it's not useful to show
-      -- if attr_name == "id" then
-      --   goto continue_attr
-      -- end
+      if attr_name == "id" then
+        goto continue_attr
+      end
 
       -- Skip purely computed attributes (those that are computed but not optional)
       -- These are always exported, never set by the user
