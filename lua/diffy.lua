@@ -275,7 +275,6 @@ local function parse_file(file_path)
   return {}
 end
 
-
 local function validate_block_attributes(
     resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
 )
@@ -294,7 +293,13 @@ local function validate_block_attributes(
         goto continue_attr
       end
 
-      -- Show all non-ignored properties that are missing (including computed ones)
+      -- Skip purely computed attributes (those that are computed but not optional)
+      -- These are always exported, never set by the user
+      if attr_info.computed and not attr_info.optional and not attr_info.required then
+        goto continue_attr
+      end
+
+      -- Show all other properties that are missing
       if not block_data.properties[attr_name] then
         local msg = string.format(
           "%s missing %s property '%s' in path %s",
