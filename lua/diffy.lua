@@ -62,7 +62,8 @@ local function discover_modules()
   local modules = {}
 
   -- Find all directories in modules/ that have terraform.tf
-  local handle = io.popen("find modules -type f -name terraform.tf | sort")
+  -- local handle = io.popen("find modules -type f -name terraform.tf | sort")
+  local handle = io.popen("find modules -type f -name terraform.tf 2>/dev/null | sort")
   if handle then
     for line in handle:lines() do
       -- Get the directory containing terraform.tf
@@ -347,7 +348,6 @@ local function validate_block_attributes(
           unique_messages
         )
       else
-        -- min_items > 0 => required
         local is_required = btype_schema.min_items and btype_schema.min_items > 0
         local msg = string.format(
           "%s missing %s block '%s' in path %s",
@@ -362,83 +362,6 @@ local function validate_block_attributes(
     end
   end
 end
-
--- local function validate_block_attributes(
---     resource_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
--- )
---   inherited_ignores = inherited_ignores or {}
---   local combined_ignores = vim.deepcopy(inherited_ignores)
---   vim.list_extend(combined_ignores, block_data.ignore_changes or {})
---
---   if block_schema.attributes then
---     for attr_name, attr_info in pairs(block_schema.attributes) do
---       if vim.tbl_contains(combined_ignores, attr_name) then
---         goto continue_attr
---       end
---       -- If an attribute is "required" but not found in our resource data
---       -- if not attr_info.computed and not block_data.properties[attr_name] then
---         if not block_data.properties[attr_name] then --show computed properties as well
---         local msg = string.format(
---           "%s missing %s property '%s' in path %s",
---           resource_type,
---           attr_info.required and "required" or "optional",
---           attr_name,
---           block_path
---         )
---         unique_messages[msg] = true
---       end
---       ::continue_attr::
---     end
---   end
---
---   if block_schema.block_types then
---     for block_name, btype_schema in pairs(block_schema.block_types) do
---       -- For example, skip the "timeouts" block
---       if block_name == "timeouts" then
---         goto continue_block
---       end
---
---       if vim.tbl_contains(combined_ignores, block_name) then
---         goto continue_block
---       end
---
---       local sub_block = block_data.blocks[block_name]
---       local dyn_block = block_data.dynamic_blocks[block_name]
---
---       if sub_block then
---         validate_block_attributes(
---           resource_type,
---           btype_schema.block,
---           sub_block,
---           block_path .. "." .. block_name,
---           combined_ignores,
---           unique_messages
---         )
---       elseif dyn_block then
---         validate_block_attributes(
---           resource_type,
---           btype_schema.block,
---           dyn_block,
---           block_path .. ".dynamic." .. block_name,
---           combined_ignores,
---           unique_messages
---         )
---       else
---         -- min_items > 0 => required
---         local is_required = btype_schema.min_items and btype_schema.min_items > 0
---         local msg = string.format(
---           "%s missing %s block '%s' in path %s",
---           resource_type,
---           is_required and "required" or "optional",
---           block_name,
---           block_path
---         )
---         unique_messages[msg] = true
---       end
---       ::continue_block::
---     end
---   end
--- end
 
 local function validate_terraform_files(module_path, module_schema)
   local module_messages = {}
