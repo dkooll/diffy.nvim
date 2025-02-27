@@ -32,4 +32,4 @@ return {
 
 It retrieves dynamicly the schemas for the specified providers.
 
-It omits optional properties when combined with computed ones
+It filters out purely computed properties, which are typically populated by the provider.

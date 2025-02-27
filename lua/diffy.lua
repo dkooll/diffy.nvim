@@ -61,8 +61,6 @@ end
 local function discover_modules()
   local modules = {}
 
-  -- Find all directories in modules/ that have terraform.tf
-  -- local handle = io.popen("find modules -type f -name terraform.tf | sort")
   local handle = io.popen("find modules -type f -name terraform.tf 2>/dev/null | sort")
   if handle then
     for line in handle:lines() do
@@ -317,7 +315,7 @@ local function validate_block_attributes(
 
   if block_schema.block_types then
     for block_name, btype_schema in pairs(block_schema.block_types) do
-      -- For example, skip the "timeouts" block
+      -- Skip the timeouts block
       if block_name == "timeouts" then
         goto continue_block
       end
