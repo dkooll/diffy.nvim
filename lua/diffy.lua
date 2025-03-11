@@ -461,17 +461,6 @@ local function validate_terraform_files(module_path, module_schema)
   -- Decrement the pending modules counter
   pending_modules = pending_modules - 1
 
-  -- If this was the last module to process, display the results
-  -- if pending_modules == 0 then
-  --   local message_list = {}
-  --   for msg, _ in pairs(global_messages) do
-  --     table.insert(message_list, msg)
-  --   end
-  --   table.sort(message_list)
-  --   write_output(message_list)
-  --
-  --   write_output({ "", "Validation complete!" })
-  -- end
   if pending_modules == 0 then
     local message_list = {}
     for msg, _ in pairs(global_messages) do
@@ -479,10 +468,8 @@ local function validate_terraform_files(module_path, module_schema)
     end
 
     if #message_list == 0 then
-      -- No differences/issues found
       write_output({ "No issues found! All resources match their schema definitions." })
     else
-      -- Issues were found, display them
       table.sort(message_list)
       write_output(message_list)
     end
