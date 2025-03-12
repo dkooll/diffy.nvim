@@ -50,19 +50,19 @@ Runs schema validation against all Terraform files in the project
 
 ## Notes
 
-It automatically discovers modules by finding terraform.tf files
+Modules are automatically discovered by scanning for terraform.tf files
 
-It retrieves schemas dynamically for the specified providers
+Dynamic schema retrieval occurs for all specified providers
 
-It filters out purely computed properties, which are populated by the provider
+Purely computed properties, which providers typically populate, are filtered out
 
-It displays validation results in a dedicated output window
+All validation results appear in a dedicated output window
 
-It analyzes main.tf and terraform.tf files within each module
+Within each module, both main.tf and terraform.tf files undergo analysis
 
-It checks for missing required properties, blocks, and attributes
+Missing required properties, blocks, and attributes are thoroughly checked
 
-It respects lifecycle ignore_changes configurations
+The plugin fully respects lifecycle ignore_changes configurations
 
 ## Requirements
 
