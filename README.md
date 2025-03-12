@@ -6,7 +6,7 @@ It analyzes your terraform configurations and submodules, helping identify missi
 
 ## Features
 
-Validates HCL resources against official provider schemas
+Validates HCL resources and data sources against official provider schemas
 
 Detects missing required and optional properties
 
