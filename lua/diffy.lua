@@ -248,7 +248,8 @@ local function parse_file(file_path)
   local bufnr = vim.fn.bufadd(file_path)
   if bufnr and bufnr > 0 then
     vim.fn.bufload(bufnr)
-    vim.api.nvim_buf_set_option(bufnr, 'filetype', 'terraform')
+    -- vim.api.nvim_buf_set_option(bufnr, 'filetype', 'terraform')
+    vim.api.nvim_set_option_value('filetype', 'terraform', { buf = bufnr })
 
     local parser = vim.treesitter.get_parser(bufnr, "hcl")
     if parser then
