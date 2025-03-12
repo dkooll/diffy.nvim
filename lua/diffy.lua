@@ -87,8 +87,9 @@ local function is_ignored(ignore_list, name)
   end
 
   -- Case insensitive check
+  name = string.lower(name)
   for _, item in ipairs(ignore_list) do
-    if string.lower(item) == string.lower(name) then
+    if string.lower(item) == name then
       return true
     end
   end
@@ -96,43 +97,30 @@ local function is_ignored(ignore_list, name)
   return false
 end
 
--- Improved parse_ignore_changes_array function
-local function parse_ignore_changes_array(node, bufnr)
-  local results = {}
+-- Extract the lifecycle ignore_changes directly from the node content
+local function extract_ignore_changes(body_node, bufnr)
+  local ignore_changes = {}
 
-  -- This is the bracket-based query for "ignore_changes" attributes
-  local bracket_query = vim.treesitter.query.parse("hcl", [[
-    (attribute
-      (identifier) @attr_name
-      (expression
-        (collection_value
-          (tuple
-            ((expression) @item)+)))
-    )
-  ]])
+  -- Get the full text of the node to parse
+  local body_text = vim.treesitter.get_node_text(body_node, bufnr)
 
-  for _, match, _ in bracket_query:iter_matches(node, bufnr) do
-    local attr_node = match[1]
-    local attr_name = vim.treesitter.get_node_text(attr_node, bufnr)
-    if attr_name == "ignore_changes" then
-      -- Starting from match[2] up to the end are the items
-      for i = 2, #match do
-        local item_node = match[i]
-        local txt = vim.treesitter.get_node_text(item_node, bufnr)
-        -- remove leading/trailing quotes if present
-        txt = txt:gsub('^"(.*)"$', "%1")
+  -- Find the ignore_changes section
+  local ignore_section = body_text:match("ignore_changes%s*=%s*%[(.-)%]")
+  if ignore_section then
+    -- If we found "all", return the special marker
+    if ignore_section:match("all") then
+      return { "*all*" }
+    end
 
-        -- Special case for "all"
-        if txt == "all" then
-          return { "*all*" } -- Special marker for ignore all
-        end
-
-        table.insert(results, txt)
+    -- Extract individual identifiers
+    for word in ignore_section:gmatch("([%w_]+)") do
+      if word ~= "ignore_changes" and word ~= "all" then
+        table.insert(ignore_changes, word)
       end
     end
   end
 
-  return results
+  return ignore_changes
 end
 
 local function parse_block_contents(node, bufnr)
@@ -153,6 +141,22 @@ local function parse_block_contents(node, bufnr)
     block_data.properties[name_txt] = true
   end
 
+  -- Directly extract lifecycle ignore_changes
+  local lifecycle_query = vim.treesitter.query.parse("hcl", [[
+    (block
+      (identifier) @block_name
+      (body) @block_body
+      (#eq? @block_name "lifecycle"))
+  ]])
+
+  for _, match, _ in lifecycle_query:iter_matches(node, bufnr) do
+    local body_node = match[2]
+    local ignore_list = extract_ignore_changes(body_node, bufnr)
+    if #ignore_list > 0 then
+      vim.list_extend(block_data.ignore_changes, ignore_list)
+    end
+  end
+
   local block_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @name
@@ -170,12 +174,7 @@ local function parse_block_contents(node, bufnr)
     end
 
     if name_txt == "lifecycle" then
-      -- If there's an "ignore_changes" attribute in lifecycle, parse it:
-      local lifecycle_data = parse_block_contents(body_node, bufnr)
-      if lifecycle_data.properties["ignore_changes"] then
-        local arr = parse_ignore_changes_array(body_node, bufnr)
-        vim.list_extend(block_data.ignore_changes, arr)
-      end
+      -- Lifecycle was already handled above
       goto continue_block
     end
 
@@ -310,7 +309,6 @@ local function parse_file(file_path)
   return { resources = {}, data_sources = {} }
 end
 
--- Updated validate_block_attributes to use case-insensitive ignore checks
 local function validate_block_attributes(
     entity_type, schema_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
 )
@@ -430,6 +428,12 @@ local function validate_terraform_files(module_path, module_schema)
       if not matching_provider_block then
         file_messages["No provider schema found for resource: " .. resource.type] = true
       else
+        -- Double check ignore_changes - print debug if needed
+        if #resource.ignore_changes > 0 and os.getenv("DEBUG_DIFFY") then
+          write_output(string.format("Resource %s has ignore_changes: %s",
+            resource.type, table.concat(resource.ignore_changes, ", ")))
+        end
+
         -- Validate the resource's properties and sub-blocks
         validate_block_attributes(
           resource.type,
