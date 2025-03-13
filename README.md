@@ -50,26 +50,16 @@ Runs schema validation against all Terraform files in the project
 
 ## Notes
 
-Modules are automatically discovered by scanning for terraform.tf files
-
 Dynamic schema retrieval occurs for all specified providers
 
 Purely computed properties, which providers typically populate, are filtered out
-
-All validation results appear in a dedicated output window
-
-Within each module, both main.tf and terraform.tf files undergo analysis
-
-Missing required properties, blocks, and attributes are thoroughly checked
 
 The plugin fully respects lifecycle ignore_changes configurations
 
 ## Requirements
 
-Neovim with treeSitter support
+Neovim 0.7.0 or higher
 
 TreeSitter HCL parser
 
 Terraform CLI accessible in your PATH
-
-Valid terraform configuration files
