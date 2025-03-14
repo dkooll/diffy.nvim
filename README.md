@@ -59,7 +59,5 @@ The plugin fully respects lifecycle ignore_changes configurations
 ## Requirements
 
 [Neovim](https://neovim.io/) 0.7.0 or higher<br>
-
 [TreeSitter](https://github.com/nvim-treesitter/nvim-treesitter) HCL parser<br>
-
 [Terraform](https://developer.hashicorp.com/terraform/install) CLI accessible in your PATH
