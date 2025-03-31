@@ -56,9 +56,17 @@ Purely computed properties, which providers typically populate, are filtered out
 
 The plugin fully respects lifecycle ignore_changes configurations
 
+## Contributors
+
+We welcome contributions from the community! Whether it's reporting a bug, suggesting a new feature, or submitting a pull request, your input is highly valued. <br><br>
+
+<a href="https://github.com/dkooll/diffy.nvim/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dkooll/diffy.nvim" />
+</a>
+
 ## Requirements
 
-[Neovim](https://neovim.io/) 0.7.0 or higher
+[Neovim](https://neovim.io/) 0.11.0 or higher
 
 [TreeSitter](https://github.com/nvim-treesitter/nvim-treesitter) HCL parser
 
