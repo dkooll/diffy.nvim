@@ -163,6 +163,46 @@ local function extract_ignore_changes(body_node, bufnr)
   return ignore_changes
 end
 
+-- Safe query iterator function that works with both old and new TreeSitter APIs
+local function safe_iter_matches(query, node, bufnr)
+  local iter_func = function(callback)
+    local ok, iter = pcall(function()
+      return query:iter_matches(node, bufnr)
+    end)
+
+    if ok then
+      -- Handle the case where iter_matches returns an iterator function
+      if type(iter) == "function" then
+        for match, metadata in iter do
+          callback(match, metadata)
+        end
+      else
+        -- Handle the case where iter_matches returns a stateful iterator
+        for _, match, metadata in iter do
+          callback(match, metadata)
+        end
+      end
+    else
+      -- Try alternative approach for newer versions
+      ok, iter = pcall(function()
+        return query:matches(node, bufnr)
+      end)
+
+      if ok and type(iter) == "table" then
+        for _, match in ipairs(iter) do
+          callback(match.captures, match.metadata or {})
+        end
+      else
+        write_output("Warning: TreeSitter query API compatibility issue. Some features may not work.")
+      end
+    end
+  end
+
+  return {
+    each = iter_func
+  }
+end
+
 local function parse_block_contents(node, bufnr)
   local block_data = {
     properties = {},
@@ -175,11 +215,13 @@ local function parse_block_contents(node, bufnr)
     (attribute (identifier) @name)
   ]])
 
-  for _, match, _ in attr_query:iter_matches(node, bufnr) do
+  safe_iter_matches(attr_query, node, bufnr).each(function(match, _)
     local name_node = match[1]
-    local name_txt = safe_get_node_text(name_node, bufnr)
-    block_data.properties[name_txt] = true
-  end
+    if name_node then
+      local name_txt = safe_get_node_text(name_node, bufnr)
+      block_data.properties[name_txt] = true
+    end
+  end)
 
   -- Directly extract lifecycle ignore_changes
   local lifecycle_query = vim.treesitter.query.parse("hcl", [[
@@ -189,13 +231,15 @@ local function parse_block_contents(node, bufnr)
       (#eq? @block_name "lifecycle"))
   ]])
 
-  for _, match, _ in lifecycle_query:iter_matches(node, bufnr) do
+  safe_iter_matches(lifecycle_query, node, bufnr).each(function(match, _)
     local body_node = match[2]
-    local ignore_list = extract_ignore_changes(body_node, bufnr)
-    if #ignore_list > 0 then
-      vim.list_extend(block_data.ignore_changes, ignore_list)
+    if body_node then
+      local ignore_list = extract_ignore_changes(body_node, bufnr)
+      if #ignore_list > 0 then
+        vim.list_extend(block_data.ignore_changes, ignore_list)
+      end
     end
-  end
+  end)
 
   local block_query = vim.treesitter.query.parse("hcl", [[
     (block
@@ -203,25 +247,23 @@ local function parse_block_contents(node, bufnr)
       (body) @body)
   ]])
 
-  for _, bmatch, _ in block_query:iter_matches(node, bufnr) do
+  safe_iter_matches(block_query, node, bufnr).each(function(bmatch, _)
     local name_node = bmatch[1]
     local body_node = bmatch[2]
-    local name_txt = safe_get_node_text(name_node, bufnr)
 
-    if name_txt == "dynamic" then
-      -- skip below, or handle in dynamic section
-      goto continue_block
+    if not (name_node and body_node) then
+      return
     end
 
-    if name_txt == "lifecycle" then
-      -- Lifecycle was already handled above
-      goto continue_block
+    local name_txt = safe_get_node_text(name_node, bufnr)
+
+    if name_txt == "dynamic" or name_txt == "lifecycle" then
+      -- skip these as they are handled elsewhere
+      return
     end
 
     block_data.blocks[name_txt] = parse_block_contents(body_node, bufnr)
-
-    ::continue_block::
-  end
+  end)
 
   local dynamic_query = vim.treesitter.query.parse("hcl", [[
     (block
@@ -231,9 +273,14 @@ local function parse_block_contents(node, bufnr)
       (#eq? @dyn_kw "dynamic"))
   ]])
 
-  for _, dmatch, _ in dynamic_query:iter_matches(node, bufnr) do
+  safe_iter_matches(dynamic_query, node, bufnr).each(function(dmatch, _)
     local dyn_name_node = dmatch[2]
     local dyn_body_node = dmatch[3]
+
+    if not (dyn_name_node and dyn_body_node) then
+      return
+    end
+
     local dyn_name_txt = safe_get_node_text(dyn_name_node, bufnr):gsub('"', "")
 
     local content_query = vim.treesitter.query.parse("hcl", [[
@@ -244,37 +291,40 @@ local function parse_block_contents(node, bufnr)
     ]])
 
     local found_content = false
-    for _, cmatch, _ in content_query:iter_matches(dyn_body_node, bufnr) do
-      found_content = true
+
+    safe_iter_matches(content_query, dyn_body_node, bufnr).each(function(cmatch, _)
       local content_body_node = cmatch[2]
-      local content_data = parse_block_contents(content_body_node, bufnr)
+      if content_body_node then
+        found_content = true
+        local content_data = parse_block_contents(content_body_node, bufnr)
 
-      block_data.dynamic_blocks[dyn_name_txt] = block_data.dynamic_blocks[dyn_name_txt] or {
-        properties = {},
-        blocks = {},
-        dynamic_blocks = {},
-        ignore_changes = {},
-      }
+        block_data.dynamic_blocks[dyn_name_txt] = block_data.dynamic_blocks[dyn_name_txt] or {
+          properties = {},
+          blocks = {},
+          dynamic_blocks = {},
+          ignore_changes = {},
+        }
 
-      -- Merge content_data into dynamic_blocks[dyn_name_txt]
-      for k, v in pairs(content_data.properties) do
-        block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
+        -- Merge content_data into dynamic_blocks[dyn_name_txt]
+        for k, v in pairs(content_data.properties) do
+          block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
+        end
+        for k, v in pairs(content_data.blocks) do
+          block_data.dynamic_blocks[dyn_name_txt].blocks[k] = v
+        end
+        for k, v in pairs(content_data.dynamic_blocks) do
+          block_data.dynamic_blocks[dyn_name_txt].dynamic_blocks[k] = v
+        end
+        for _, ic in ipairs(content_data.ignore_changes) do
+          table.insert(block_data.dynamic_blocks[dyn_name_txt].ignore_changes, ic)
+        end
       end
-      for k, v in pairs(content_data.blocks) do
-        block_data.dynamic_blocks[dyn_name_txt].blocks[k] = v
-      end
-      for k, v in pairs(content_data.dynamic_blocks) do
-        block_data.dynamic_blocks[dyn_name_txt].dynamic_blocks[k] = v
-      end
-      for _, ic in ipairs(content_data.ignore_changes) do
-        table.insert(block_data.dynamic_blocks[dyn_name_txt].ignore_changes, ic)
-      end
-    end
+    end)
 
     if not found_content then
       block_data.dynamic_blocks[dyn_name_txt] = parse_block_contents(dyn_body_node, bufnr)
     end
-  end
+  end)
 
   return block_data
 end
@@ -307,13 +357,13 @@ local function parse_file(file_path)
             (body) @body)
         ]])
 
-        for _, captures, _ in block_query:iter_matches(root, bufnr) do
+        safe_iter_matches(block_query, root, bufnr).each(function(captures, _)
           local block_type_node = captures[1]
           local resource_type_node = captures[2]
           local body_node = captures[4]
 
           if not (block_type_node and resource_type_node and body_node) then
-            goto continue_block
+            return
           end
 
           local block_type_txt = safe_get_node_text(block_type_node, bufnr)
@@ -337,9 +387,7 @@ local function parse_file(file_path)
               ignore_changes = parsed_data.ignore_changes,
             })
           end
-
-          ::continue_block::
-        end
+        end)
 
         return { resources = resources, data_sources = data_sources }
       end
