@@ -351,8 +351,8 @@ local function validate_block_attributes(
         goto continue_attr
       end
 
-      -- Skip deprecated attributes
-      if attr_info.deprecated then
+      -- Skip deprecated attributes - check for both possible representations
+      if attr_info.deprecated == true or attr_info.deprecation_message then
         goto continue_attr
       end
 
@@ -381,6 +381,11 @@ local function validate_block_attributes(
 
       -- Use case-insensitive ignore checking
       if is_ignored(combined_ignores, block_name) then
+        goto continue_block
+      end
+
+      -- Skip deprecated blocks (if the schema provides deprecation info on blocks)
+      if btype_schema.deprecated == true or btype_schema.deprecation_message then
         goto continue_block
       end
 
@@ -423,6 +428,104 @@ local function validate_block_attributes(
     end
   end
 end
+
+-- local function validate_block_attributes(
+--     entity_type, schema_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
+-- )
+--   inherited_ignores = inherited_ignores or {}
+--   local combined_ignores = vim.deepcopy(inherited_ignores)
+--   vim.list_extend(combined_ignores, block_data.ignore_changes or {})
+--
+--   if block_schema.attributes then
+--     for attr_name, attr_info in pairs(block_schema.attributes) do
+--       -- Use case-insensitive ignore checking
+--       if is_ignored(combined_ignores, attr_name) then
+--         goto continue_attr
+--       end
+--
+--       -- Skip 'id' property as it's not useful to show
+--       if attr_name == "id" then
+--         goto continue_attr
+--       end
+--
+--       -- Skip purely computed attributes (those that are computed but not optional)
+--       -- These are always exported, never set by the user
+--       if attr_info.computed and not attr_info.optional and not attr_info.required then
+--         goto continue_attr
+--       end
+--
+--       -- Skip deprecated attributes
+--       if attr_info.deprecated then
+--         goto continue_attr
+--       end
+--
+--       -- Show all other properties that are missing
+--       if not block_data.properties[attr_name] then
+--         local msg = string.format(
+--           "%s source %s missing %s property '%s' in path %s",
+--           schema_type,
+--           entity_type,
+--           attr_info.required and "required" or "optional",
+--           attr_name,
+--           block_path
+--         )
+--         unique_messages[msg] = true
+--       end
+--       ::continue_attr::
+--     end
+--   end
+--
+--   if block_schema.block_types then
+--     for block_name, btype_schema in pairs(block_schema.block_types) do
+--       -- Skip the timeouts block
+--       if block_name == "timeouts" then
+--         goto continue_block
+--       end
+--
+--       -- Use case-insensitive ignore checking
+--       if is_ignored(combined_ignores, block_name) then
+--         goto continue_block
+--       end
+--
+--       local sub_block = block_data.blocks[block_name]
+--       local dyn_block = block_data.dynamic_blocks[block_name]
+--
+--       if sub_block then
+--         validate_block_attributes(
+--           entity_type,
+--           schema_type,
+--           btype_schema.block,
+--           sub_block,
+--           block_path .. "." .. block_name,
+--           combined_ignores,
+--           unique_messages
+--         )
+--       elseif dyn_block then
+--         validate_block_attributes(
+--           entity_type,
+--           schema_type,
+--           btype_schema.block,
+--           dyn_block,
+--           block_path .. ".dynamic." .. block_name,
+--           combined_ignores,
+--           unique_messages
+--         )
+--       else
+--         local is_required = btype_schema.min_items and btype_schema.min_items > 0
+--         local msg = string.format(
+--           "%s %s missing %s block '%s' in path %s",
+--           schema_type,
+--           entity_type,
+--           is_required and "required" or "optional",
+--           block_name,
+--           block_path
+--         )
+--         unique_messages[msg] = true
+--       end
+--       ::continue_block::
+--     end
+--   end
+-- end
 
 local function validate_terraform_files(module_path, module_schema)
   local module_messages = {}
