@@ -351,6 +351,11 @@ local function validate_block_attributes(
         goto continue_attr
       end
 
+      -- Skip deprecated attributes
+      if attr_info.deprecated then
+        goto continue_attr
+      end
+
       -- Show all other properties that are missing
       if not block_data.properties[attr_name] then
         local msg = string.format(
