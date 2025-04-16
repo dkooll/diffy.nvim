@@ -1,5 +1,7 @@
 local M = {}
 
+-- Dependencies
+
 -- Global variables for output and tracking
 local output_bufnr = nil
 local output_winid = nil
