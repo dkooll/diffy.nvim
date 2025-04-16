@@ -1,11 +1,8 @@
 local M = {}
 
--- Dependencies
-
 -- Global variables for output and tracking
 local output_bufnr = nil
 local output_winid = nil
-local schema_cache = {} -- Cache for provider schemas
 local parser_cache = {} -- Cache for TreeSitter parsers
 local global_messages = {}
 local pending_jobs = 0
@@ -615,7 +612,10 @@ local function validate_terraform_files(module_path, module_schema)
   if pending_jobs == 0 then
     local message_list = {}
     for msg, _ in pairs(global_messages) do
-      table.insert(message_list, msg)
+      -- Make sure to filter out provider warnings
+      if not msg:match("Provider declared but not used by any resource or data source:") then
+        table.insert(message_list, msg)
+      end
     end
 
     if #message_list == 0 then
@@ -633,25 +633,20 @@ local function validate_terraform_files(module_path, module_schema)
   end
 end
 
--- Optimized schema retrieval with caching
-local function get_terraform_schema(module_path)
-  -- Check if schema is already cached
-  local schema_key = module_path
-  if schema_cache[schema_key] then
-    -- Use cached schema
-    validate_terraform_files(module_path, schema_cache[schema_key])
-    return
-  end
+-- Function to process a single module
+local function process_module(module_path)
+  write_output("Fetching schema for module: " .. module_path)
 
-  -- Check if terraform.tf exists
+  -- Use the module's own terraform.tf file
   local tf_file = module_path .. "/terraform.tf"
+
   if vim.fn.filereadable(tf_file) ~= 1 then
     write_output("Could not find terraform.tf in " .. module_path)
     pending_jobs = pending_jobs - 1
     return
   end
 
-  -- Run terraform init and providers schema in one job
+  -- Run the terraform commands ONLY in this module's directory
   local combined_output = {}
 
   -- Use vim.fn.jobstart for better compatibility
@@ -684,13 +679,11 @@ local function get_terraform_schema(module_path)
         return
       end
 
-      -- Try to parse the JSON output
+      -- Parse the JSON output
       local json_str = table.concat(combined_output, "\n")
       local success, decoded = pcall(vim.json.decode, json_str)
       if success and decoded and decoded.provider_schemas then
-        -- Cache the schema for future use
-        schema_cache[schema_key] = decoded.provider_schemas
-        -- Validate with the retrieved schema
+        -- Only validate THIS module's files with its own schema
         validate_terraform_files(module_path, decoded.provider_schemas)
       else
         write_output("Failed to parse schema JSON for " .. module_path)
@@ -740,7 +733,7 @@ function M.validate_resources()
 
       -- Process this module
       vim.schedule(function()
-        get_terraform_schema(module_path)
+        process_module(module_path)
 
         -- Handle job completion
         vim.defer_fn(function()
@@ -780,10 +773,6 @@ function M.setup(opts)
       node_text_cache = {}
       file_buffer_cache[file_path] = nil
       parser_cache[file_path] = nil
-
-      -- Clear schema cache for affected module
-      local module_dir = vim.fn.fnamemodify(file_path, ":h")
-      schema_cache[module_dir] = nil
     end
   })
 
