@@ -91,28 +91,41 @@ end
 local function discover_modules()
   local modules = {}
 
-  -- Use plenary.scandir to get all terraform.tf files recursively
+  -- First check the current directory
+  if vim.fn.filereadable("terraform.tf") == 1 then
+    modules["."] = true
+  end
+
+  -- Use plenary.scandir to find terraform.tf files
   local scan_opts = {
     respect_gitignore = true,
     add_dirs = false,
-    depth = 10, -- Limit depth to avoid excessive recursion
+    depth = 10, -- Reasonable depth limit
     search_pattern = "terraform%.tf$"
   }
 
   local tf_files = plenary_scan.scan_dir(".", scan_opts)
 
-  -- Process the found files to extract module dirs
+  -- Process found files to extract module dirs and deduplicate
   for _, file_path in ipairs(tf_files) do
     local module_dir = vim.fn.fnamemodify(file_path, ":h")
-    table.insert(modules, module_dir)
+    if module_dir ~= "." then -- We already checked current dir
+      modules[module_dir] = true
+    end
   end
 
-  -- Add current directory if terraform.tf exists
-  if vim.fn.filereadable("terraform.tf") == 1 and not vim.tbl_contains(modules, ".") then
-    table.insert(modules, ".")
+  -- Convert to list
+  local result = {}
+  for dir, _ in pairs(modules) do
+    table.insert(result, dir)
   end
 
-  return modules
+  -- Debug info
+  if os.getenv("DEBUG_DIFFY") then
+    write_output("Found module paths: " .. vim.inspect(result))
+  end
+
+  return result
 end
 
 -- TreeSitter node text helper with caching
@@ -425,8 +438,8 @@ local function validate_block_attributes(
 
       -- Skip special cases
       if attr_name == "id" or
-          (attr_info.computed and not attr_info.optional and not attr_info.required) or
-          attr_info.deprecated == true or attr_info.deprecation_message then
+         (attr_info.computed and not attr_info.optional and not attr_info.required) or
+         attr_info.deprecated == true or attr_info.deprecation_message then
         goto continue_attr
       end
 
@@ -451,8 +464,8 @@ local function validate_block_attributes(
     for block_name, btype_schema in pairs(block_schema.block_types) do
       -- Skip quickly if special cases
       if block_name == "timeouts" or
-          is_ignored(combined_ignores, block_name) or
-          btype_schema.deprecated == true or btype_schema.deprecation_message then
+         is_ignored(combined_ignores, block_name) or
+         btype_schema.deprecated == true or btype_schema.deprecation_message then
         goto continue_block
       end
 
@@ -656,9 +669,7 @@ local function get_terraform_schema(module_path)
   local job_id = vim.fn.jobstart({
     "bash",
     "-c",
-    "cd " ..
-    module_path ..
-    " && terraform init -no-color >/dev/null 2>&1 && terraform providers schema -json && rm -rf .terraform .terraform.lock.hcl"
+    "cd " .. module_path .. " && terraform init -no-color >/dev/null 2>&1 && terraform providers schema -json && rm -rf .terraform .terraform.lock.hcl"
   }, {
     stdout_buffered = true,
     on_stdout = function(_, data)
@@ -770,8 +781,8 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 
   -- Register buffer autocmd to clear caches when appropriate
-  vim.api.nvim_create_autocmd({ "BufWritePost" }, {
-    pattern = { "*.tf", "*.hcl" },
+  vim.api.nvim_create_autocmd({"BufWritePost"}, {
+    pattern = {"*.tf", "*.hcl"},
     callback = function()
       -- Clear caches for affected files
       local file_path = vim.fn.expand("<afile>:p")
