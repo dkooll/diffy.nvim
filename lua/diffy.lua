@@ -359,7 +359,7 @@ local function validate_block_attributes(
       -- Show all other properties that are missing
       if not block_data.properties[attr_name] then
         local msg = string.format(
-          "%s source %s missing %s property '%s' in path %s",
+          "%s %s missing %s property '%s' in path %s",
           schema_type,
           entity_type,
           attr_info.required and "required" or "optional",
