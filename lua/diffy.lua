@@ -5,9 +5,6 @@ local output_bufnr = nil
 local output_winid = nil
 local pending_modules = 0
 local global_messages = {}
-local output_buffer = {}
-local file_cache = {}
-local ignore_cache = {}
 
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
@@ -39,25 +36,16 @@ end
 
 local function write_output(lines, clear)
   if clear then
-    output_buffer = {}
+    vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
   end
   if type(lines) == "string" then
     lines = { lines }
   end
-  vim.list_extend(output_buffer, lines)
-end
-
-local function flush_output()
-  if #output_buffer == 0 then return end
-
   local buf = ensure_output_buffer()
   local line_count = vim.api.nvim_buf_line_count(buf)
-  vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, output_buffer)
-
+  vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, lines)
   local win = ensure_output_window()
-  vim.api.nvim_win_set_cursor(win, { line_count + #output_buffer, 0 })
-
-  output_buffer = {}
+  vim.api.nvim_win_set_cursor(win, { line_count + #lines, 0 })
   vim.cmd("redraw")
 end
 
@@ -104,20 +92,10 @@ local function is_ignored(ignore_list, name)
     return true
   end
 
-  -- Use cached lowercase version
-  local lower_name = ignore_cache[name]
-  if not lower_name then
-    lower_name = string.lower(name)
-    ignore_cache[name] = lower_name
-  end
-
+  -- Case insensitive check
+  name = string.lower(name)
   for _, item in ipairs(ignore_list) do
-    local lower_item = ignore_cache[item]
-    if not lower_item then
-      lower_item = string.lower(item)
-      ignore_cache[item] = lower_item
-    end
-    if lower_item == lower_name then
+    if string.lower(item) == name then
       return true
     end
   end
@@ -159,16 +137,63 @@ local function parse_block_contents(node, bufnr)
     ignore_changes = {},
   }
 
-  -- Combined query for attributes, blocks, lifecycle, and dynamic blocks
-  local combined_query = vim.treesitter.query.parse("hcl", [[
-    (attribute (identifier) @attr_name)
+  local attr_query = vim.treesitter.query.parse("hcl", [[
+    (attribute (identifier) @name)
+  ]])
+
+  -- Execute the query using iter_matches with all=true for Neovim 0.11+
+  for _, match, _ in attr_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
+    local name_node = match[1] and match[1][1] -- First node of the first capture
+    if name_node then
+      local name_txt = get_node_text(name_node, bufnr)
+      if name_txt and name_txt ~= "" then
+        block_data.properties[name_txt] = true
+      end
+    end
+  end
+
+  -- Directly extract lifecycle ignore_changes
+  local lifecycle_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @block_name
-      (body) @block_body)
+      (body) @block_body
+      (#eq? @block_name "lifecycle"))
+  ]])
+
+  for _, match, _ in lifecycle_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
+    local body_node = match[2] and match[2][1] -- First node of the second capture
+    if body_node then
+      local ignore_list = extract_ignore_changes(body_node, bufnr)
+      if #ignore_list > 0 then
+        vim.list_extend(block_data.ignore_changes, ignore_list)
+      end
+    end
+  end
+
+  local block_query = vim.treesitter.query.parse("hcl", [[
     (block
-      (identifier) @lifecycle_name
-      (body) @lifecycle_body
-      (#eq? @lifecycle_name "lifecycle"))
+      (identifier) @name
+      (body) @body)
+  ]])
+
+  for _, match, _ in block_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
+    local name_node = match[1] and match[1][1] -- First node of the first capture
+    local body_node = match[2] and match[2][1] -- First node of the second capture
+
+    if name_node and body_node then
+      local name_txt = get_node_text(name_node, bufnr)
+
+      if name_txt == "dynamic" or name_txt == "lifecycle" then
+        -- skip these blocks as they are handled elsewhere
+        goto continue_block
+      end
+
+      block_data.blocks[name_txt] = parse_block_contents(body_node, bufnr)
+    end
+    ::continue_block::
+  end
+
+  local dynamic_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @dyn_kw
       (string_lit) @dyn_name
@@ -176,82 +201,53 @@ local function parse_block_contents(node, bufnr)
       (#eq? @dyn_kw "dynamic"))
   ]])
 
-  -- Execute the combined query once
-  for _, match, _ in combined_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
-    -- Check for attribute
-    if match[1] and match[1][1] then
-      local name_txt = get_node_text(match[1][1], bufnr)
-      if name_txt and name_txt ~= "" then
-        block_data.properties[name_txt] = true
-      end
-    end
+  for _, match, _ in dynamic_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
+    local dyn_name_node = match[2] and match[2][1] -- First node of the second capture
+    local dyn_body_node = match[3] and match[3][1] -- First node of the third capture
 
-    -- Check for lifecycle block
-    if match[3] and match[3][1] and match[4] and match[4][1] then
-      local lifecycle_name = get_node_text(match[3][1], bufnr)
-      if lifecycle_name == "lifecycle" then
-        local ignore_list = extract_ignore_changes(match[4][1], bufnr)
-        if #ignore_list > 0 then
-          vim.list_extend(block_data.ignore_changes, ignore_list)
-        end
-      end
-    end
+    if dyn_name_node and dyn_body_node then
+      local dyn_name_txt = get_node_text(dyn_name_node, bufnr):gsub('"', "")
 
-    -- Check for dynamic block
-    if match[5] and match[5][1] and match[6] and match[6][1] and match[7] and match[7][1] then
-      local dyn_kw = get_node_text(match[5][1], bufnr)
-      if dyn_kw == "dynamic" then
-        local dyn_name_txt = get_node_text(match[9][1], bufnr):gsub('"', "")
-        local dyn_body_node = match[7][1]
+      local content_query = vim.treesitter.query.parse("hcl", [[
+        (block
+          (identifier) @content_kw
+          (body) @content_body
+          (#eq? @content_kw "content"))
+      ]])
 
-        local content_query = vim.treesitter.query.parse("hcl", [[
-          (block
-            (identifier) @content_kw
-            (body) @content_body
-            (#eq? @content_kw "content"))
-        ]])
+      local found_content = false
 
-        local found_content = false
-        for _, cmatch, _ in content_query:iter_matches(dyn_body_node, bufnr, 0, -1, { all = true }) do
-          local content_body_node = cmatch[2] and cmatch[2][1]
-          if content_body_node then
-            found_content = true
-            local content_data = parse_block_contents(content_body_node, bufnr)
+      for _, cmatch, _ in content_query:iter_matches(dyn_body_node, bufnr, 0, -1, { all = true }) do
+        local content_body_node = cmatch[2] and cmatch[2][1] -- First node of the second capture
+        if content_body_node then
+          found_content = true
+          local content_data = parse_block_contents(content_body_node, bufnr)
 
-            block_data.dynamic_blocks[dyn_name_txt] = block_data.dynamic_blocks[dyn_name_txt] or {
-              properties = {},
-              blocks = {},
-              dynamic_blocks = {},
-              ignore_changes = {},
-            }
+          block_data.dynamic_blocks[dyn_name_txt] = block_data.dynamic_blocks[dyn_name_txt] or {
+            properties = {},
+            blocks = {},
+            dynamic_blocks = {},
+            ignore_changes = {},
+          }
 
-            -- Merge content_data into dynamic_blocks[dyn_name_txt]
-            for k, v in pairs(content_data.properties) do
-              block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
-            end
-            for k, v in pairs(content_data.blocks) do
-              block_data.dynamic_blocks[dyn_name_txt].blocks[k] = v
-            end
-            for k, v in pairs(content_data.dynamic_blocks) do
-              block_data.dynamic_blocks[dyn_name_txt].dynamic_blocks[k] = v
-            end
-            for _, ic in ipairs(content_data.ignore_changes) do
-              table.insert(block_data.dynamic_blocks[dyn_name_txt].ignore_changes, ic)
-            end
+          -- Merge content_data into dynamic_blocks[dyn_name_txt]
+          for k, v in pairs(content_data.properties) do
+            block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
+          end
+          for k, v in pairs(content_data.blocks) do
+            block_data.dynamic_blocks[dyn_name_txt].blocks[k] = v
+          end
+          for k, v in pairs(content_data.dynamic_blocks) do
+            block_data.dynamic_blocks[dyn_name_txt].dynamic_blocks[k] = v
+          end
+          for _, ic in ipairs(content_data.ignore_changes) do
+            table.insert(block_data.dynamic_blocks[dyn_name_txt].ignore_changes, ic)
           end
         end
-
-        if not found_content then
-          block_data.dynamic_blocks[dyn_name_txt] = parse_block_contents(dyn_body_node, bufnr)
-        end
       end
-    end
 
-    -- Check for regular block (not lifecycle or dynamic)
-    if match[2] and match[2][1] and match[3] and match[3][1] then
-      local block_name_txt = get_node_text(match[2][1], bufnr)
-      if block_name_txt ~= "dynamic" and block_name_txt ~= "lifecycle" then
-        block_data.blocks[block_name_txt] = parse_block_contents(match[3][1], bufnr)
+      if not found_content then
+        block_data.dynamic_blocks[dyn_name_txt] = parse_block_contents(dyn_body_node, bufnr)
       end
     end
   end
@@ -262,18 +258,6 @@ end
 local function parse_file(file_path)
   if not ensure_hcl_parser() then
     return { resources = {}, data_sources = {} }
-  end
-
-  -- Check cache first
-  local stat = vim.uv.fs_stat(file_path)
-  if not stat then
-    return { resources = {}, data_sources = {} }
-  end
-
-  local cache_key = file_path
-  local cached = file_cache[cache_key]
-  if cached and cached.mtime == stat.mtime.sec then
-    return cached.data
   end
 
   -- Use bufadd/bufload to get the file content into a buffer
@@ -334,15 +318,7 @@ local function parse_file(file_path)
           ::continue_block::
         end
 
-        local result = { resources = resources, data_sources = data_sources }
-
-        -- Cache the result
-        file_cache[cache_key] = {
-          mtime = stat.mtime.sec,
-          data = result
-        }
-
-        return result
+        return { resources = resources, data_sources = data_sources }
       end
     end
   end
@@ -354,18 +330,8 @@ local function validate_block_attributes(
     entity_type, schema_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
 )
   inherited_ignores = inherited_ignores or {}
-  local combined_ignores = {}
-
-  -- Efficiently combine ignore lists without deep copying
-  for _, ignore in ipairs(inherited_ignores) do
-    table.insert(combined_ignores, ignore)
-  end
-
-  if block_data.ignore_changes then
-    for _, ignore in ipairs(block_data.ignore_changes) do
-      table.insert(combined_ignores, ignore)
-    end
-  end
+  local combined_ignores = vim.deepcopy(inherited_ignores)
+  vim.list_extend(combined_ignores, block_data.ignore_changes or {})
 
   if block_schema.attributes then
     for attr_name, attr_info in pairs(block_schema.attributes) do
@@ -644,7 +610,6 @@ local function validate_terraform_files(module_path, module_schema)
     end
 
     write_output({ "", "Validation complete!" })
-    flush_output()
   end
 end
 
@@ -718,6 +683,7 @@ local function process_module(module_path)
             pending_modules = pending_modules - 1
           end
 
+
           vim.fn.system({ "rm", "-rf", module_path .. "/.terraform" })
           vim.fn.system({ "rm", "-f", module_path .. "/.terraform.lock.hcl" })
         end
@@ -732,29 +698,18 @@ local function process_module(module_path)
 end
 
 function M.validate_resources()
-  output_buffer = {}
   write_output({}, true)
   write_output("Validating Terraform resource and data source schemas...")
   global_messages = {}
-
-  -- Clear caches periodically to prevent memory leaks
-  if vim.tbl_count(file_cache) > 100 then
-    file_cache = {}
-  end
-  if vim.tbl_count(ignore_cache) > 1000 then
-    ignore_cache = {}
-  end
 
   local modules = discover_modules()
 
   if #modules == 0 then
     write_output("No Terraform modules found containing terraform.tf")
-    flush_output()
     return
   end
 
   write_output("Found " .. #modules .. " module(s)")
-  flush_output()
 
   -- Set the pending modules counter to track when all modules are done
   pending_modules = #modules
