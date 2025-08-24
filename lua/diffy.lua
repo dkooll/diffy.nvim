@@ -1,6 +1,5 @@
 local M = {}
 
--- Global variables for output and tracking
 local output_bufnr = nil
 local output_winid = nil
 local pending_modules = 0
@@ -248,7 +247,6 @@ local function parse_block_contents(node, bufnr)
 
   return block_data
 end
---
 local function parse_file(file_path)
   if not ensure_hcl_parser() then
     return { resources = {}, data_sources = {} }
@@ -319,7 +317,7 @@ local function parse_file(file_path)
 
   return { resources = {}, data_sources = {} }
 end
---
+
 local function validate_block_attributes(
     entity_type, schema_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
 )
@@ -422,7 +420,7 @@ local function validate_block_attributes(
     end
   end
 end
---
+
 local function validate_terraform_files(module_path, module_schema)
   local module_messages = {}
 
@@ -606,7 +604,7 @@ local function validate_terraform_files(module_path, module_schema)
     write_output({ "", "Validation complete!" })
   end
 end
---
+
 -- Helper function to generate cache key from terraform.tf providers
 local function get_providers_cache_key(tf_file)
   local file = io.open(tf_file, "r")
@@ -747,10 +745,8 @@ function M.validate_resources()
   end
 end
 
---
 function M.setup()
   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 end
 
---
 return M
