@@ -6,6 +6,8 @@ local output_winid = nil
 local pending_modules = 0
 local global_messages = {}
 
+-- Schema cache to avoid repeated terraform init/schema calls
+local schema_cache = {}
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
     output_bufnr = vim.api.nvim_create_buf(false, true)
@@ -16,7 +18,6 @@ local function ensure_output_buffer()
   end
   return output_bufnr
 end
-
 local function ensure_output_window()
   if not output_winid or not vim.api.nvim_win_is_valid(output_winid) then
     local current_win = vim.api.nvim_get_current_win()
@@ -33,7 +34,6 @@ local function ensure_output_window()
   end
   return output_winid
 end
-
 local function write_output(lines, clear)
   if clear then
     vim.api.nvim_buf_set_lines(ensure_output_buffer(), 0, -1, false, {})
@@ -48,7 +48,6 @@ local function write_output(lines, clear)
   vim.api.nvim_win_set_cursor(win, { line_count + #lines, 0 })
   vim.cmd("redraw")
 end
-
 local function ensure_hcl_parser()
   local ok = pcall(vim.treesitter.get_parser, 0, "hcl")
   if not ok then
@@ -57,7 +56,6 @@ local function ensure_hcl_parser()
   end
   return true
 end
-
 local function discover_modules()
   local modules = {}
 
@@ -78,13 +76,11 @@ local function discover_modules()
 
   return modules
 end
-
 -- Helper function to get node text
 local function get_node_text(node, bufnr)
   if not node then return "" end
   return vim.treesitter.get_node_text(node, bufnr)
 end
-
 -- Helper function to check if an attribute is ignored (with case insensitivity)
 local function is_ignored(ignore_list, name)
   -- Check for the special "all" marker
@@ -102,7 +98,6 @@ local function is_ignored(ignore_list, name)
 
   return false
 end
-
 -- Extract the lifecycle ignore_changes directly from the node content
 local function extract_ignore_changes(body_node, bufnr)
   local ignore_changes = {}
@@ -128,7 +123,6 @@ local function extract_ignore_changes(body_node, bufnr)
 
   return ignore_changes
 end
-
 local function parse_block_contents(node, bufnr)
   local block_data = {
     properties = {},
@@ -254,7 +248,7 @@ local function parse_block_contents(node, bufnr)
 
   return block_data
 end
-
+--
 local function parse_file(file_path)
   if not ensure_hcl_parser() then
     return { resources = {}, data_sources = {} }
@@ -325,7 +319,7 @@ local function parse_file(file_path)
 
   return { resources = {}, data_sources = {} }
 end
-
+--
 local function validate_block_attributes(
     entity_type, schema_type, block_schema, block_data, block_path, inherited_ignores, unique_messages
 )
@@ -428,7 +422,7 @@ local function validate_block_attributes(
     end
   end
 end
-
+--
 local function validate_terraform_files(module_path, module_schema)
   local module_messages = {}
 
@@ -612,11 +606,31 @@ local function validate_terraform_files(module_path, module_schema)
     write_output({ "", "Validation complete!" })
   end
 end
+--
+-- Helper function to generate cache key from terraform.tf providers
+local function get_providers_cache_key(tf_file)
+  local file = io.open(tf_file, "r")
+  if not file then return nil end
 
--- Function to process a single module
+  local content = file:read("*all")
+  file:close()
+
+  -- Extract provider versions/sources to create cache key
+  local providers = {}
+  for provider_block in content:gmatch("provider%s+\"([^\"]+)\"") do
+    table.insert(providers, provider_block)
+  end
+  for req_provider in content:gmatch("([^%s]+)%s*=%s*{[^}]*source%s*=%s*\"([^\"]+)\"[^}]*version%s*=%s*\"([^\"]+)\"") do
+    table.insert(providers, req_provider)
+  end
+
+  if #providers == 0 then return nil end
+  table.sort(providers)
+  return table.concat(providers, "|")
+end
+
+-- Function to process a single module with caching
 local function process_module(module_path)
-  write_output("Fetching schema for module: " .. module_path)
-
   -- Use the module's own terraform.tf file directly
   local tf_file = module_path .. "/terraform.tf"
 
@@ -625,6 +639,16 @@ local function process_module(module_path)
     pending_modules = pending_modules - 1
     return
   end
+
+  -- Check cache first
+  local cache_key = get_providers_cache_key(tf_file)
+  if cache_key and schema_cache[cache_key] then
+    write_output("Using cached schema for module: " .. module_path)
+    validate_terraform_files(module_path, schema_cache[cache_key])
+    return
+  end
+
+  write_output("Fetching schema for module: " .. module_path)
 
   local init_job = vim.fn.jobstart({ "terraform", "init" }, {
     cwd = module_path,
@@ -659,6 +683,10 @@ local function process_module(module_path)
             local json_str = table.concat(data, "\n")
             local success, decoded = pcall(vim.json.decode, json_str)
             if success and decoded and decoded.provider_schemas then
+              -- Cache the schema for future use
+              if cache_key then
+                schema_cache[cache_key] = decoded.provider_schemas
+              end
               validate_terraform_files(module_path, decoded.provider_schemas)
             else
               write_output("Failed to parse schema JSON for " .. module_path)
@@ -683,7 +711,6 @@ local function process_module(module_path)
             pending_modules = pending_modules - 1
           end
 
-
           vim.fn.system({ "rm", "-rf", module_path .. "/.terraform" })
           vim.fn.system({ "rm", "-f", module_path .. "/.terraform.lock.hcl" })
         end
@@ -696,7 +723,7 @@ local function process_module(module_path)
     pending_modules = pending_modules - 1
   end
 end
-
+--
 function M.validate_resources()
   write_output({}, true)
   write_output("Validating Terraform resource and data source schemas...")
@@ -720,8 +747,10 @@ function M.validate_resources()
   end
 end
 
+--
 function M.setup()
   vim.api.nvim_create_user_command("TerraformValidateSchema", M.validate_resources, {})
 end
 
+--
 return M
