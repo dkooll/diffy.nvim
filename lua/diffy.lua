@@ -343,8 +343,8 @@ local function validate_block_attributes(
         goto continue_attr
       end
 
-      -- Skip deprecated attributes - check for both possible representations
-      if attr_info.deprecated == true or attr_info.deprecation_message then
+      -- Skip deprecated attributes
+      if attr_info.deprecated == true then
         goto continue_attr
       end
 
@@ -376,8 +376,8 @@ local function validate_block_attributes(
         goto continue_block
       end
 
-      -- Skip deprecated blocks (if the schema provides deprecation info on blocks)
-      if btype_schema.deprecated == true or btype_schema.deprecation_message then
+      -- Skip deprecated blocks
+      if btype_schema.deprecated == true then
         goto continue_block
       end
 
