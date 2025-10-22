@@ -5,7 +5,6 @@ local output_winid = nil
 local pending_modules = 0
 local global_messages = {}
 
--- Schema cache to avoid repeated terraform init/schema calls
 local schema_cache = {}
 local function ensure_output_buffer()
   if not output_bufnr or not vim.api.nvim_buf_is_valid(output_bufnr) then
@@ -61,33 +60,29 @@ local function discover_modules()
   local handle = io.popen("find modules -type f -name terraform.tf 2>/dev/null | sort")
   if handle then
     for line in handle:lines() do
-      -- Get the directory containing terraform.tf
       local module_dir = vim.fn.fnamemodify(line, ":h")
       table.insert(modules, module_dir)
     end
     handle:close()
   end
 
-  -- Add current directory as well
   if vim.fn.filereadable("terraform.tf") == 1 then
     table.insert(modules, ".")
   end
 
   return modules
 end
--- Helper function to get node text
+
 local function get_node_text(node, bufnr)
   if not node then return "" end
   return vim.treesitter.get_node_text(node, bufnr)
 end
--- Helper function to check if an attribute is ignored (with case insensitivity)
+
 local function is_ignored(ignore_list, name)
-  -- Check for the special "all" marker
   if vim.tbl_contains(ignore_list, "*all*") then
     return true
   end
 
-  -- Case insensitive check
   name = string.lower(name)
   for _, item in ipairs(ignore_list) do
     if string.lower(item) == name then
@@ -97,22 +92,18 @@ local function is_ignored(ignore_list, name)
 
   return false
 end
--- Extract the lifecycle ignore_changes directly from the node content
+
 local function extract_ignore_changes(body_node, bufnr)
   local ignore_changes = {}
 
-  -- Get the full text of the node to parse
   local body_text = get_node_text(body_node, bufnr)
 
-  -- Find the ignore_changes section
   local ignore_section = body_text:match("ignore_changes%s*=%s*%[(.-)%]")
   if ignore_section then
-    -- If we found "all", return the special marker
     if ignore_section:match("all") then
       return { "*all*" }
     end
 
-    -- Extract individual identifiers
     for word in ignore_section:gmatch("([%w_]+)") do
       if word ~= "ignore_changes" and word ~= "all" then
         table.insert(ignore_changes, word)
@@ -134,7 +125,6 @@ local function parse_block_contents(node, bufnr)
     (attribute (identifier) @name)
   ]])
 
-  -- Execute the query using iter_matches with all=true for Neovim 0.11+
   for _, match, _ in attr_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
     local name_node = match[1] and match[1][1] -- First node of the first capture
     if name_node then
@@ -145,7 +135,6 @@ local function parse_block_contents(node, bufnr)
     end
   end
 
-  -- Directly extract lifecycle ignore_changes
   local lifecycle_query = vim.treesitter.query.parse("hcl", [[
     (block
       (identifier) @block_name
@@ -177,7 +166,6 @@ local function parse_block_contents(node, bufnr)
       local name_txt = get_node_text(name_node, bufnr)
 
       if name_txt == "dynamic" or name_txt == "lifecycle" then
-        -- skip these blocks as they are handled elsewhere
         goto continue_block
       end
 
@@ -195,8 +183,8 @@ local function parse_block_contents(node, bufnr)
   ]])
 
   for _, match, _ in dynamic_query:iter_matches(node, bufnr, 0, -1, { all = true }) do
-    local dyn_name_node = match[2] and match[2][1] -- First node of the second capture
-    local dyn_body_node = match[3] and match[3][1] -- First node of the third capture
+    local dyn_name_node = match[2] and match[2][1]
+    local dyn_body_node = match[3] and match[3][1]
 
     if dyn_name_node and dyn_body_node then
       local dyn_name_txt = get_node_text(dyn_name_node, bufnr):gsub('"', "")
@@ -223,7 +211,6 @@ local function parse_block_contents(node, bufnr)
             ignore_changes = {},
           }
 
-          -- Merge content_data into dynamic_blocks[dyn_name_txt]
           for k, v in pairs(content_data.properties) do
             block_data.dynamic_blocks[dyn_name_txt].properties[k] = v
           end
@@ -242,6 +229,8 @@ local function parse_block_contents(node, bufnr)
       if not found_content then
         block_data.dynamic_blocks[dyn_name_txt] = parse_block_contents(dyn_body_node, bufnr)
       end
+
+      block_data.properties[dyn_name_txt] = true
     end
   end
 
@@ -252,7 +241,6 @@ local function parse_file(file_path)
     return { resources = {}, data_sources = {} }
   end
 
-  -- Use bufadd/bufload to get the file content into a buffer
   local bufnr = vim.fn.bufadd(file_path)
   if bufnr and bufnr > 0 then
     vim.fn.bufload(bufnr)
@@ -266,7 +254,6 @@ local function parse_file(file_path)
         local resources = {}
         local data_sources = {}
 
-        -- Query for both resource and data blocks
         local block_query = vim.treesitter.query.parse("hcl", [[
           (block
             (identifier) @block_type
@@ -275,11 +262,10 @@ local function parse_file(file_path)
             (body) @body)
         ]])
 
-        -- Use iter_matches with all=true for Neovim 0.11+
         for _, match, _ in block_query:iter_matches(root, bufnr, 0, -1, { all = true }) do
-          local block_type_node = match[1] and match[1][1]    -- First node of capture index 1
-          local resource_type_node = match[2] and match[2][1] -- First node of capture index 2
-          local body_node = match[4] and match[4][1]          -- First node of capture index 4
+          local block_type_node = match[1] and match[1][1]
+          local resource_type_node = match[2] and match[2][1]
+          local body_node = match[4] and match[4][1]
 
           if not (block_type_node and resource_type_node and body_node) then
             goto continue_block
@@ -327,28 +313,22 @@ local function validate_block_attributes(
 
   if block_schema.attributes then
     for attr_name, attr_info in pairs(block_schema.attributes) do
-      -- Use case-insensitive ignore checking
       if is_ignored(combined_ignores, attr_name) then
         goto continue_attr
       end
 
-      -- Skip 'id' property as it's not useful to show
       if attr_name == "id" then
         goto continue_attr
       end
 
-      -- Skip purely computed attributes (those that are computed but not optional)
-      -- These are always exported, never set by the user
       if attr_info.computed and not attr_info.optional and not attr_info.required then
         goto continue_attr
       end
 
-      -- Skip deprecated attributes - check for both possible representations
       if attr_info.deprecated == true or attr_info.deprecation_message then
         goto continue_attr
       end
 
-      -- Show all other properties that are missing
       if not block_data.properties[attr_name] then
         local msg = string.format(
           "%s %s missing %s property '%s' in path %s",
@@ -366,17 +346,14 @@ local function validate_block_attributes(
 
   if block_schema.block_types then
     for block_name, btype_schema in pairs(block_schema.block_types) do
-      -- Skip the timeouts block
       if block_name == "timeouts" then
         goto continue_block
       end
 
-      -- Use case-insensitive ignore checking
       if is_ignored(combined_ignores, block_name) then
         goto continue_block
       end
 
-      -- Skip deprecated blocks (if the schema provides deprecation info on blocks)
       if btype_schema.deprecated == true or btype_schema.deprecation_message then
         goto continue_block
       end
@@ -430,11 +407,9 @@ local function validate_terraform_files(module_path, module_schema)
     local file_messages = {}
     local used_providers = {}
 
-    -- Validate resources
     for _, resource in ipairs(parsed.resources) do
       local matching_provider_block = nil
 
-      -- Attempt to find a provider whose resource_schemas has resource.type
       for provider_key, provider_data in pairs(module_schema) do
         local r_schemas = provider_data.resource_schemas
         if r_schemas and r_schemas[resource.type] then
@@ -447,13 +422,11 @@ local function validate_terraform_files(module_path, module_schema)
       if not matching_provider_block then
         file_messages["No provider schema found for resource: " .. resource.type] = true
       else
-        -- Double check ignore_changes - print debug if needed
         if #resource.ignore_changes > 0 and os.getenv("DEBUG_DIFFY") then
           write_output(string.format("Resource %s has ignore_changes: %s",
             resource.type, table.concat(resource.ignore_changes, ", ")))
         end
 
-        -- Validate the resource's properties and sub-blocks
         validate_block_attributes(
           resource.type,
           "resource",
@@ -466,11 +439,9 @@ local function validate_terraform_files(module_path, module_schema)
       end
     end
 
-    -- Validate data sources
     for _, data_source in ipairs(parsed.data_sources) do
       local matching_provider_block = nil
 
-      -- Attempt to find a provider whose data_source_schemas has data_source.type
       for provider_key, provider_data in pairs(module_schema) do
         local d_schemas = provider_data.data_source_schemas
         if d_schemas and d_schemas[data_source.type] then
@@ -483,7 +454,6 @@ local function validate_terraform_files(module_path, module_schema)
       if not matching_provider_block then
         file_messages["No provider schema found for data source: " .. data_source.type] = true
       else
-        -- Validate the data source's properties and sub-blocks
         validate_block_attributes(
           data_source.type,
           "data",
@@ -496,30 +466,24 @@ local function validate_terraform_files(module_path, module_schema)
       end
     end
 
-    -- Check for unused providers
     for provider_key, _ in pairs(module_schema) do
       if not used_providers[provider_key] then
         file_messages["Provider declared but not used by any resource or data source: " .. provider_key] = true
       end
     end
 
-    -- Add file messages to module messages
     for msg, _ in pairs(file_messages) do
       module_messages[msg] = true
     end
   end
 
-  -- Validate terraform.tf in this module
   local terraform_tf = module_path .. "/terraform.tf"
   if vim.fn.filereadable(terraform_tf) == 1 then
-    -- Terraform.tf typically has provider blocks, not resources
-    -- but we should check it for any resources/data sources that might be in there
     local parsed = parse_file(terraform_tf)
 
     if #parsed.resources > 0 or #parsed.data_sources > 0 then
       local file_messages = {}
 
-      -- Validate resources in terraform.tf
       for _, resource in ipairs(parsed.resources) do
         local matching_provider_block = nil
 
@@ -546,7 +510,6 @@ local function validate_terraform_files(module_path, module_schema)
         end
       end
 
-      -- Validate data sources in terraform.tf
       for _, data_source in ipairs(parsed.data_sources) do
         local matching_provider_block = nil
 
@@ -573,19 +536,16 @@ local function validate_terraform_files(module_path, module_schema)
         end
       end
 
-      -- Add file messages to module messages
       for msg, _ in pairs(file_messages) do
         module_messages[msg] = true
       end
     end
   end
 
-  -- Add module name prefix to all messages and add to global messages
   for msg, _ in pairs(module_messages) do
     global_messages[module_path .. ": " .. msg] = true
   end
 
-  -- Decrement the pending modules counter
   pending_modules = pending_modules - 1
 
   if pending_modules == 0 then
@@ -605,7 +565,6 @@ local function validate_terraform_files(module_path, module_schema)
   end
 end
 
--- Helper function to generate cache key from terraform.tf providers
 local function get_providers_cache_key(tf_file)
   local file = io.open(tf_file, "r")
   if not file then return nil end
@@ -613,7 +572,6 @@ local function get_providers_cache_key(tf_file)
   local content = file:read("*all")
   file:close()
 
-  -- Extract provider versions/sources to create cache key
   local providers = {}
   for provider_block in content:gmatch("provider%s+\"([^\"]+)\"") do
     table.insert(providers, provider_block)
@@ -627,9 +585,7 @@ local function get_providers_cache_key(tf_file)
   return table.concat(providers, "|")
 end
 
--- Function to process a single module with caching
 local function process_module(module_path)
-  -- Use the module's own terraform.tf file directly
   local tf_file = module_path .. "/terraform.tf"
 
   if vim.fn.filereadable(tf_file) ~= 1 then
@@ -638,7 +594,6 @@ local function process_module(module_path)
     return
   end
 
-  -- Check cache first
   local cache_key = get_providers_cache_key(tf_file)
   if cache_key and schema_cache[cache_key] then
     write_output("Using cached schema for module: " .. module_path)
@@ -672,7 +627,6 @@ local function process_module(module_path)
         return
       end
 
-      -- Get schema for this module
       vim.fn.jobstart({ "terraform", "providers", "schema", "-json" }, {
         cwd = module_path,
         stdout_buffered = true,
@@ -681,7 +635,6 @@ local function process_module(module_path)
             local json_str = table.concat(data, "\n")
             local success, decoded = pcall(vim.json.decode, json_str)
             if success and decoded and decoded.provider_schemas then
-              -- Cache the schema for future use
               if cache_key then
                 schema_cache[cache_key] = decoded.provider_schemas
               end
@@ -736,10 +689,8 @@ function M.validate_resources()
 
   write_output("Found " .. #modules .. " module(s)")
 
-  -- Set the pending modules counter to track when all modules are done
   pending_modules = #modules
 
-  -- Process each module in parallel
   for _, module_path in ipairs(modules) do
     process_module(module_path)
   end
