@@ -18,6 +18,14 @@ Respects ignore_changes lifecycle settings
 
 Analyzes entire project structure including submodules
 
+## Requirements
+
+Neovim 0.11.0 or higher
+
+Treesitter.nvim plugin
+
+Terraform cli accessible in your PATH
+
 ## Usage
 
 To configure the plugin with [lazy.nvim](https://github.com/folke/lazy.nvim), use the following setup:
@@ -63,11 +71,3 @@ We welcome contributions from the community! Whether it's reporting a bug, sugge
 <a href="https://github.com/dkooll/diffy.nvim/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=dkooll/diffy.nvim" />
 </a>
-
-## Requirements
-
-[Neovim](https://neovim.io/) 0.11.0 or higher
-
-[TreeSitter](https://github.com/nvim-treesitter/nvim-treesitter) HCL parser
-
-[Terraform](https://developer.hashicorp.com/terraform/install) CLI accessible in your PATH
